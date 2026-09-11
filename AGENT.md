@@ -655,47 +655,80 @@ wrappers in pages):
   the curated list and log a `console.warn` — the dropdown
   is never empty in practice.
 
-### 6.8 `scripts/`
-Lives at the repo root and is **not** part of the Nuxt build (not
-under `app/`). Contains throwaway scripts for live verification of
-Core wiring against public RPCs.
-- `scripts/smoke-test.ts` — instantiates both adapters, fetches
+### 6.8 `app/core/test/`
+All tests live under `app/core/test/` (NOT at the repo root, NOT in
+a top-level `scripts/` directory — that pattern was retired). The
+test directory **mirrors the `app/core/` tree** so a reader can find
+the test for a given module by walking the same path:
+
+```
+app/core/test/
+├── _helpers.ts                            # shared LCG + buildSyntheticHistory
+├── test-constants.ts                      # shared PRICE_DECIMALS = 18
+├── scripts/
+│   └── smoke.test.ts                      # root sanity (Uniswap V3 + Shadow wire-up)
+├── domains/
+│   ├── pool/pool.test.ts                  # Phase 3 — Core Domain wire-up
+│   ├── simulation/simulation.test.ts      # Phase 5 — 4 simulation levels
+│   └── recommendation/recommendation.test.ts # Phase 6 — recommendation engine
+├── math/
+│   └── math-engine.test.ts                # Phase 4 — math + analytics
+└── application/
+    └── use_cases/
+        ├── use_cases.test.ts              # Phase 7 — 5 use cases + DTOs + errors
+        └── get_pool_history.test.ts       # Phase 10 — GetPoolHistoryUseCase
+```
+
+Run the whole suite with `pnpm test` (which expands to
+`vitest run`); a single file with
+`pnpm test app/core/test/domains/pool/pool.test.ts`; the
+interactive watch mode with `pnpm test:watch`; the Vitest UI
+dashboard with `pnpm test:ui`; coverage with
+`pnpm test:coverage` (opt-in — runs `vitest run --coverage`).
+
+Shared helpers (`_helpers.ts`, `test-constants.ts`) live alongside
+the test files but do **not** match the `*.test.ts` include glob
+(`_helpers.ts` starts with `_`, `test-constants.ts` has no
+`.test.` suffix) so Vitest never tries to execute them.
+
+Each test file is a self-contained scenario:
+- **`scripts/smoke.test.ts`** — instantiates both adapters, fetches
   USDC/WETH 0.05% on Ethereum mainnet via Uniswap V3, and probes
-  Sonic RPC reachability for Shadow. Run via
-  `pnpm smoke` (which expands to `npx -y tsx scripts/smoke-test.ts`;
-  no `tsx` in repo deps; npx fetches it ephemerally).
-- `scripts/smoke-test-phase3.ts` — exercises the Phase 3 domain
-  stack end-to-end against Ethereum mainnet USDC/WETH 0.05%: builds
-  a `Pool`/`Market` aggregate from live state, runs the
+  Sonic RPC reachability for Shadow. Live reads may fail (public
+  RPCs are unreliable) — the test tolerates transport-level
+  failures and asserts only the wire-up shape.
+- **`domains/pool/pool.test.ts`** — Phase 3 domain stack
+  end-to-end against Ethereum mainnet USDC/WETH 0.05%: builds a
+  `Pool`/`Market` aggregate from live state, runs the
   `ConstantRangeGenerator` to produce three candidate ranges, runs
-  the `AnalyticsEngine` and `DepositSimulation` for each, and proves
-  `PoolHistory.priceMove()` is well-defined. Run via
-  `pnpm smoke:phase3`.
-- `scripts/smoke-test-phase4.ts` — exercises the Phase 4 math engine
+  the `AnalyticsEngine` and `DepositSimulation` for each, and
+  proves `PoolHistory.priceMove()` is well-defined.
+- **`math/math-engine.test.ts`** — Phase 4 math engine
   end-to-end. Builds a synthetic 8-day daily price history anchored
   on the live USDC/WETH 0.05% pool state, then computes realized
-  volatility, IL, capital efficiency, both range generators, APR, and
-  a Sharpe-like score. Run via `pnpm smoke:phase4`.
-- `scripts/smoke-test-phase5.ts` — exercises the Phase 5 simulation
-  engine end-to-end. Wires `DepositSimulation` (level 1),
-  `FuturePriceSimulation` (level 2 — three scenarios: −10%,
-  unchanged, +50%), `HistoricalReplaySimulation` (level 3 — over a
-  synthetic 30-day history at 30% target APR), and
+  volatility, IL, capital efficiency, both range generators, APR,
+  and a Sharpe-like score.
+- **`domains/simulation/simulation.test.ts`** — Phase 5 simulation
+  engine. Wires `DepositSimulation` (level 1),
+  `FuturePriceSimulation` (level 2 — scenarios at unchanged, −10%,
+  +10%), `HistoricalReplaySimulation` (level 3 — round-trip APR
+  matches the 30% target within 5% tolerance), and
   `MonteCarloSimulation` (level 4 — 200 paths × 30 daily steps,
   GBM with `σ_annual` from the live-anchored vol estimate). If the
   live RPC read fails it falls back to a synthetic pool fixture so
-  the test always completes. Run via `pnpm smoke:phase5`.
-- `scripts/smoke-test-phase6.ts` — exercises the Phase 6
-  recommendation engine end-to-end. Builds five strategies
+  the test always completes.
+- **`domains/recommendation/recommendation.test.ts`** — Phase 6
+  recommendation engine. Builds five strategies
   (`BalancedStrategy`, `MaximumFeeStrategy`, `LowestRiskStrategy`,
   `HighestCapitalEfficiencyStrategy`, `HighestSharpeStrategy`) on a
   USDC/WETH 0.05% pool, derives `σ_annual` from a synthetic 30-day
   history, runs the engine against a 5-candidate sweep, and
   re-runs with a 0.5× weight on `lowest-risk` to verify the
-  `applyWeight` math end-to-end. Falls back to a synthetic pool
-  if the live RPC fails. Run via `pnpm smoke:phase6`.
-- `scripts/smoke-test-phase7.ts` — exercises the Phase 7
-  application layer end-to-end. Wires `NetworkRegistry` →
+  `applyWeight` math end-to-end. Confirms the LowestRisk
+  strategy's top CE is ≤ MaximumFee's top CE (orthogonal biases),
+  and that the engine is deterministic across re-runs.
+- **`application/use_cases/use_cases.test.ts`** — Phase 7
+  application layer. Wires `NetworkRegistry` →
   `NetworkProvider` → `createCoreServices(...)` → `useCases()` and
   runs every one of the five use cases (`discoverPools`,
   `analyzePool`, `simulatePosition`, `replayHistoricalPerformance`,
@@ -707,11 +740,19 @@ Core wiring against public RPCs.
   negative paths: `InvalidUseCaseInputError` (bad inputs /
   bad ranges), `MissingPoolHistoryError` (replay without history),
   and `AdapterNotFoundError` (unregistered chain). The custom
-  mainnet `TNetwork` overrides `rpcUrl` to publicnode and sets
+  mainnet `TNetwork` overrides `rpcUrls` to publicnode and sets
   `multicall3Address` because the bundled `ethereum` constant uses
-  llamarpc (frequently 521). Run via `pnpm smoke:phase7`.
-- `scripts/smoke-test-constants.ts` — shared display-precision
-  constant used by every smoke script.
+  llamarpc (frequently 521).
+- **`application/use_cases/get_pool_history.test.ts`** — Phase 10
+  `GetPoolHistoryUseCase` and the `IProtocolAdapter
+  .getPoolStateAtBlock` extension. Three tests: live USDC/WETH
+  0.05% (on-chain or synthetic, ≥ 2 snapshots), direct
+  `getPoolStateAtBlock` adapter call returning a non-zero tick at
+  a historical block, and WETH/USDT 0.3% (volatile pool to confirm
+  the volatility path doesn't divide by zero on organic movement).
+
+See §11 for the testing rules (no Playwright, location, Vitest
+idioms, commands).
 
 ### 6.9 Phase 3 — Core Domain (done)
 Phase 3 builds the **protocol-independent business model** on top of
@@ -937,9 +978,10 @@ Phase 4 also extends two existing domain modules:
     sigmaMultipliers, tickSpacingOverride? })`.
   - `index.ts` — barrel updated.
 
-Smoke: `scripts/smoke-test-phase4.ts` (run via `pnpm smoke:phase4`)
-exercises every Phase 4 metric end-to-end. It builds a synthetic
-8-day daily price history anchored on the live USDC/WETH 0.05% pool
+Test: `app/core/test/math/math-engine.test.ts` (run via
+`pnpm test app/core/test/math/math-engine.test.ts`) exercises
+every Phase 4 metric end-to-end. It builds a synthetic 8-day
+daily price history anchored on the live USDC/WETH 0.05% pool
 state (free RPCs without archive tokens don't permit historical
 `eth_call`), then computes:
 
@@ -1030,7 +1072,8 @@ no on-chain reads. New modules:
 - `app/core/domains/simulation/index.ts` — barrel updated to
   re-export all four simulation levels.
 
-Smoke: `scripts/smoke-test-phase5.ts` (run via `pnpm smoke:phase5`)
+Test: `app/core/test/domains/simulation/simulation.test.ts` (run
+via `pnpm test app/core/test/domains/simulation/simulation.test.ts`)
 exercises all four simulation levels end-to-end. It wires a live
 USDC/WETH 0.05% pool (or a synthetic fallback if the RPC fails),
 re-quotes a 100 USDC position, and reports:
@@ -1178,16 +1221,15 @@ modules:
 - `app/core/domains/recommendation/index.ts` — barrel updated to
   re-export all of the above.
 
-Smoke: `scripts/smoke-test-phase6.ts` (run via `pnpm smoke:phase6`)
+Test: `app/core/test/domains/recommendation/recommendation.test.ts`
+(run via `pnpm test
+app/core/test/domains/recommendation/recommendation.test.ts`)
 exercises the engine end-to-end against the live USDC/WETH 0.05%
 pool (or a synthetic fallback). It builds a synthetic 30-day daily
 history, derives `σ_annual ≈ 51%`, and feeds all five strategies
 with `expectedApr = 30%`. The ConstantRangeGenerator produces
 five candidates (widths 100/500/2000/10000/50000 ticks at 10-tick
-spacing); the engine produces 22 recommendations (5 candidates ×
-5 strategies − 3 dropped because `BalancedStrategy` zeroed out at
-low CE for the widest range and `LowestRiskStrategy` zeroed out at
-IL=0 for the tightest range). The 9 sanity assertions cover:
+spacing). The sanity assertions cover:
 
 - engine produces ≥1 recommendation,
 - ranking is monotonic by score,
@@ -1403,11 +1445,11 @@ app/core/services/
 app/core/index.ts                         # now re-exports application + services
 ```
 
-End-to-end verified via `scripts/smoke-test-phase7.ts` (18/18
-checks — DTO shapes, use-case orchestration, negative paths,
+End-to-end verified via `app/core/test/application/use_cases/use_cases.test.ts`
+(11/11 checks — DTO shapes, use-case orchestration, negative paths,
 `IRpcProvider` `blockTag` extension). `pnpm typecheck` is
 clean, `pnpm run build` produces the Nuxt bundle, and
-`pnpm smoke:phase{3,4,5,6,7}` all pass.
+`pnpm test` (all 34 tests across 7 files) passes.
 
 Known caveats:
 
@@ -1962,10 +2004,11 @@ action.
 - `pnpm typecheck` ✓
 - `pnpm exec nuxt prepare` ✓
 - `pnpm run build` ✓
-- `pnpm smoke:phase10` ✓ — exercises both on-chain history
-  (USDC/WETH 0.05% and WETH/USDT 0.3% on Ethereum mainnet) and
-  the synthetic fallback path. Confirms `getPoolStateAtBlock`
-  returns a non-zero tick at a historical block.
+- `pnpm test app/core/test/application/use_cases/get_pool_history.test.ts` ✓
+  — exercises both on-chain history (USDC/WETH 0.05% and WETH/USDT
+  0.3% on Ethereum mainnet) and the synthetic fallback path.
+  Confirms `getPoolStateAtBlock` returns a non-zero tick at a
+  historical block.
 
 ---
 
@@ -1988,20 +2031,28 @@ Suggested order (matches README):
 3. Uniswap V3 + Shadow adapter *(done — Phase 2; live smoke-tested
    against Ethereum mainnet USDC/WETH 0.05%)*
 4. Core domain *(done — Phase 3; value objects, math, eight domain
-   modules; live smoke-tested via `pnpm smoke:phase3`)*
+   modules; live-tested via `pnpm test app/core/test/domains/pool/pool.test.ts`)*
 5. Math engine *(done — Phase 4; IL, APR, capital efficiency,
-   realized volatility, Sharpe-like score; live+synthetic smoke via
-   `pnpm smoke:phase4`)*
+   realized volatility, Sharpe-like score; live+synthetic tests in
+   `app/core/test/math/math-engine.test.ts`, run via
+   `pnpm test app/core/test/math/math-engine.test.ts`)*
 6. Simulation engine *(done — Phase 5; four levels — deposit,
    future price, historical replay, Monte Carlo; live+synthetic
-   smoke via `pnpm smoke:phase5`)*
+   tests in `app/core/test/domains/simulation/simulation.test.ts`,
+   run via `pnpm test app/core/test/domains/simulation/simulation.test.ts`)*
 7. Recommendation engine *(done — Phase 6; five concrete
    strategies + orchestrator + scoring config + value objects;
-   live+synthetic smoke via `pnpm smoke:phase6`)*
+   live+synthetic tests in
+   `app/core/test/domains/recommendation/recommendation.test.ts`,
+   run via
+   `pnpm test app/core/test/domains/recommendation/recommendation.test.ts`)*
 8. Application layer use cases *(done — Phase 7; five use cases,
    four DTOs, three use-case errors, IRpcProvider `blockTag`
    extension, and `CoreServices` composition root — live +
-   synthetic smoke via `pnpm smoke:phase7`, 18/18 checks)*
+   synthetic tests in
+   `app/core/test/application/use_cases/use_cases.test.ts`, run via
+   `pnpm test app/core/test/application/use_cases/use_cases.test.ts`,
+   11/11 checks)*
 9. Nuxt UI *(done — Phase 8; see §6.15 for module inventory;
    `@nuxt/ui` v4 wired with Tailwind 4 CSS, plugin
    `app/plugins/core.client.ts` mounts the CoreServices
@@ -2046,6 +2097,16 @@ Suggested order (matches README):
   postfix (see §4.10). The UI layer (composables, components,
   pages, layouts, plugins, middleware, utils) is exempt and
   follows the Nuxt 4 conventions table in §4.10.
+- Don't introduce **Playwright, Puppeteer, Cypress, or any other
+  browser end-to-end test runner.** No `@playwright/test`,
+  `playwright`, `puppeteer`, `cypress` as a dependency. No browser
+  smoke scripts, no headless-chromium tests. Tests run in Node
+  via Vitest only (see §11.1).
+- Don't commit code before the user has explicitly approved the
+  diff. Show the diff (or a `git diff --stat`), wait for an
+  unambiguous "approved" / "go ahead" / "commit it" (or
+  equivalent), then commit. No speculative commits, no "I'll just
+  push and we'll see" — see §11.6.
 
 ---
 
@@ -2244,6 +2305,8 @@ Before declaring a task complete, verify:
       `pnpm add <pkg>`). No `npm` or `yarn` commands anywhere.
 - [ ] `pnpm run build` (i.e. `nuxt build`) succeeds.
 - [ ] `pnpm exec nuxt prepare` succeeds.
+- [ ] `pnpm test` (Vitest) passes — all suites green.
+- [ ] `pnpm typecheck` is clean.
 - [ ] No new imports violate the dependency rules in §3.
 - [ ] No `any`, no `// @ts-ignore`.
 - [ ] Every new folder has a barrel `index.ts`.
@@ -2261,6 +2324,128 @@ Before declaring a task complete, verify:
 - [ ] `app/composables/**` only contains thin glue, no business logic.
 - [ ] No `package-lock.json` or `yarn.lock` was introduced; only
       `pnpm-lock.yaml` is tracked.
+- [ ] **Showed the user a diff (`git status` + `git diff --stat`) and
+      received explicit approval before committing.** No commits
+      without a green light. See §11.6.
+
+---
+
+## 11. Testing
+
+### 11.1 No browser / no Playwright
+Do **not** add Playwright, Puppeteer, Cypress, or any other
+binary-driving browser E2E runner. The app is wallet-less, runs
+entirely in the browser as a static Nuxt SPA, and the Core is
+framework-agnostic — there is no UI to drive with a browser. All
+tests run in plain Node via Vitest.
+
+What this forbids concretely:
+- `playwright`, `@playwright/test`, `puppeteer`, `cypress`,
+  `webdriverio`, `testcafe` — none of these as dev deps.
+- A `tests/e2e/` or `e2e/` directory at the repo root.
+- A `playwright.config.*` file.
+- Any `npm install -g <something>` that pulls a browser binary.
+- Mocking the DOM via `jsdom`/`happy-dom` for chart components.
+  Chart rendering is pure Canvas; the data is tested directly.
+
+If a UI-flow concern genuinely needs a browser, raise it with the
+user before adding any of the above. The expected outcome of
+that conversation is "no, we don't need a browser" — the answer
+so far has been unanimous.
+
+### 11.2 Test location
+Tests live under `app/core/test/`, **never** at the repo root.
+The previous top-level `scripts/` directory was retired; the
+`pnpm smoke:phase*` scripts were rewritten as Vitest files. The
+new layout (see §6.8) mirrors `app/core/` so the test for a
+module is co-located with the module tree:
+- `app/core/test/scripts/smoke.test.ts` — root sanity
+- `app/core/test/domains/pool/pool.test.ts` — Phase 3
+- `app/core/test/math/math-engine.test.ts` — Phase 4
+- `app/core/test/domains/simulation/simulation.test.ts` — Phase 5
+- `app/core/test/domains/recommendation/recommendation.test.ts` — Phase 6
+- `app/core/test/application/use_cases/use_cases.test.ts` — Phase 7
+- `app/core/test/application/use_cases/get_pool_history.test.ts` — Phase 10
+
+The directory MUST be picked up by Vitest's `include` glob
+(`vitest.config.ts`). Shared helpers live alongside the tests as
+`_helpers.ts` (leading underscore) and `test-constants.ts` (no
+`.test.` suffix) so Vitest never executes them. New test files
+must follow the same convention.
+
+### 11.3 Vitest idioms
+Tests are written in Vitest's first-class API. **No** ad-hoc
+`console.log` + `process.exit(1)` scripts, no hand-rolled
+assertion helpers, no `tsx`-style shebang scripts.
+
+- `import { describe, it, expect, beforeAll, afterAll } from
+  'vitest';` — globals are off (config: `test.globals: false`),
+  so always import explicitly.
+- Assertions are real `expect(...)` calls: `toBe`, `toEqual`,
+  `toBeGreaterThan`, `toBeInstanceOf`, `rejects.toBeInstanceOf`,
+  etc. No `if (!ok) throw new Error(...)` patterns.
+- `it.skip(...)` is fine for tests that require a specific
+  environment (e.g. live mainnet RPC) when running offline.
+- Asynchronous setup goes in `beforeAll` / `beforeEach`; teardown
+  in `afterAll` / `afterEach`. Don't `await` in the test body
+  when the setup is reusable.
+- Test names follow `it('does X under condition Y', ...)` —
+  imperative, descriptive, no "test that" prefix.
+- Don't introduce chai, jest, mocha, or assertion libraries other
+  than Vitest's `expect`.
+
+### 11.4 Test commands
+Vitest is the only test runner. The `package.json` script map:
+
+| Command | Effect |
+|---|---|
+| `pnpm test` | `vitest run` — full suite, one-shot, default reporter |
+| `pnpm test:watch` | `vitest` — interactive watch mode |
+| `pnpm test:ui` | `vitest --ui` — opens the Vitest UI dashboard |
+| `pnpm test:coverage` | `vitest run --coverage` — opt-in coverage report |
+
+The `pnpm smoke:phase*` scripts that used to live in
+`package.json` are **deleted**. They have no equivalent — use
+`pnpm test app/core/test/<path>.test.ts` to run a single file
+instead.
+
+There is no `--no-coverage` flag on `pnpm test`; coverage is
+opt-in via `pnpm test:coverage` so the default run stays fast.
+
+### 11.5 Live RPC in tests
+Tests may issue live RPC reads (the Phase 7 + 10 tests do this
+against `ethereum-rpc.publicnode.com`). The convention is:
+- Wrap every live read in a `try/catch` that degrades to a
+  deterministic synthetic fixture on transport failure. Public
+  RPCs are unreliable; the suite must stay green offline.
+- Live reads are tolerable **only** because they are
+  `await fetch(...)`-shaped network I/O, not browser I/O. They
+  use the same viem stack the production code uses.
+- The first `it(...)` in a test file that depends on live state
+  should `try { live = await loadLivePool(); } catch { live =
+  null; }` and skip the live-only assertions if `live === null`.
+  The synthetic fallback is always present, so the test
+  exercises *something* even when the public RPC is down.
+
+### 11.6 Approval gate before commit
+**No commit without explicit user approval.** The agent's
+standard pattern is:
+1. Make the changes.
+2. Run the verification suite (`pnpm typecheck`, `pnpm test`,
+   `pnpm exec nuxt prepare`, `pnpm run build`).
+3. Show the user a `git status` + `git diff --stat` summary.
+4. **Wait.** Do not commit until the user replies with an
+   unambiguous "approved" / "go ahead" / "commit it" / "ship
+   it" (or a local equivalent).
+5. Then commit, with a message that summarises the change in
+   one line.
+
+This applies to *every* commit, including small doc tweaks and
+refactors. A speculative commit ("I'll just push and we'll see")
+is a violation. If the user has already given blanket approval
+for a well-scoped task, that counts — but if in doubt, ask.
+
+The Definition of Done in §10 carries a matching checkbox.
 
 ---
 
