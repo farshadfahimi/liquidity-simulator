@@ -88,9 +88,15 @@ export class RpcProvider implements IRpcProvider {
   }
 
   async getBlock(tag: TBlockTag): Promise<TBlock> {
-    const block = await this.client.getBlock({
-      blockTag: typeof tag === 'bigint' ? tag : tag,
-    });
+    // viem 2.55+ has split `getBlock` parameters: `blockNumber`
+    // (bigint) and `blockTag` (string). Passing a bigint to
+    // `blockTag` sends the unprefixed decimal string and the RPC
+    // rejects it as "hex string without 0x prefix". Forward the
+    // bigint to the right field.
+    const params = typeof tag === 'bigint'
+      ? { blockNumber: tag }
+      : { blockTag: tag };
+    const block = await this.client.getBlock(params);
 
     return {
       number: block.number ?? 0n,

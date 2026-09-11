@@ -31,6 +31,20 @@ export interface IProtocolAdapter {
   getPoolState(pool: TAddress): Promise<TPoolState>;
 
   /**
+   * Historical state of a single pool pinned to a specific block
+   * number. Used by the charts use case to build a snapshot
+   * history. When the underlying RPC doesn't have archive state
+   * for `blockNumber`, the implementation should throw a
+   * recognisable error (we treat that as the trigger to fall
+   * back to a synthetic history). Defaults to `getPoolState` for
+   * adapters that don't need history.
+   */
+  getPoolStateAtBlock(
+    pool: TAddress,
+    blockNumber: bigint,
+  ): Promise<TPoolState>;
+
+  /**
    * Return tick data inside `[tickLower, tickUpper]` for a pool.
    */
   getTicks(

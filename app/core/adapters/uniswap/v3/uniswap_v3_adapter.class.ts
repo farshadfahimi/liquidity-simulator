@@ -59,6 +59,41 @@ export class UniswapV3Adapter implements IProtocolAdapter {
     return this.reader.readFullState(pool);
   }
 
+  async getPoolStateAtBlock(
+    pool: TAddress,
+    blockNumber: bigint,
+  ): Promise<TPoolState> {
+    // We need token metadata + fee + tickSpacing too (a Price value
+    // object requires the token decimals). Fetch metadata at the
+    // *latest* block (it's constant for a pool) and only pin
+    // `slot0` to the historical block — that's the only call that
+    // actually changes over time.
+    const meta = await this.reader.readMetadata(pool);
+    const [tokenA, tokenB] = await this.tokens.resolveMany([
+      meta.token0,
+      meta.token1,
+    ]);
+    const { tick, sqrtPriceX96 } = await this.reader.readStateAtBlock(
+      pool,
+      blockNumber,
+    );
+
+    return {
+      pool,
+      token0: tokenA!,
+      token1: tokenB!,
+      fee: meta.fee,
+      tickSpacing: meta.tickSpacing,
+      sqrtPriceX96,
+      tick,
+      // The other fields are only consumed by quote / replay; for
+      // a chart snapshot they're irrelevant. Fill with zero.
+      liquidity: 0n,
+      feeGrowthGlobal0X128: 0n,
+      feeGrowthGlobal1X128: 0n,
+    };
+  }
+
   async getTicks(
     pool: TAddress,
     range: TTickRange,

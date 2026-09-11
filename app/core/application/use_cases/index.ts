@@ -23,3 +23,6 @@ export {
   CompareStrategiesUseCase,
   toRecommendationDTO,
 } from './compare_strategies.use_case';
+
+export type { IGetPoolHistoryInput } from './get_pool_history.use_case';
+export { GetPoolHistoryUseCase } from './get_pool_history.use_case';

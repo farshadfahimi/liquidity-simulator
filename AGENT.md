@@ -1507,8 +1507,10 @@ app/
 
 #### Caveats / open
 
-- **No charts yet.** Bar/line visualization is documented in
-  Phase 9 (see README §9). Pages render a textual table for now.
+- **Charts shipped in Phase 10 (see §6.17).** Earlier
+  "no charts yet" caveat is now resolved for the Charts tab on
+  the pool page; other surfaces (Discover, Analytics) remain
+  textual.
 - **All four bundled chains ship with a registered adapter AND
   a multicall3 address.** `app/plugins/core.client.ts` registers
   Uniswap V3 for Ethereum / Arbitrum / Base and Shadow CL for
@@ -1859,6 +1861,111 @@ env-var escape hatch.
   history provider didn't need updates.
 - `pnpm typecheck`, `pnpm exec nuxt prepare`, `pnpm run build`
   all pass clean.
+
+---
+
+### 6.18 Phase 10 — Charts (done)
+
+Phase 10 closes the Phase 8 backlog item "Charts (bar / line) for
+the Analytics tab" by adding a fifth tab to the pool page
+(`details | recommendation | simulation | strategies | charts`).
+The tab is a one-page **price-history line chart** with the
+**top-1 strategy's price range overlaid as a green box** so the
+user can visually see "where to enter" relative to recent price
+action.
+
+#### New use case: `GetPoolHistoryUseCase`
+
+- `app/core/application/use_cases/get_pool_history.use_case.ts`
+- DTO: `app/core/application/dtos/pool_history.dto.ts`
+  (`IPoolHistoryDTO` with `snapshots: IHistorySnapshotDTO[]`,
+  `source: 'on-chain' | 'synthetic'`, `fromBlock`, `toBlock`,
+  `annualizedVolatility`).
+- Strategy:
+  1. Resolve the adapter + fetch the *current* pool state.
+  2. Walk back `numSnapshots` blocks at `blockStep` intervals
+     (defaults: 60 snapshots, per-chain step in
+     `DEFAULT_BLOCK_STEP` — 200 blocks for Ethereum/Arbitrum,
+     600 for Base/Sonic).
+  3. For each historical block, call the new
+     `IProtocolAdapter.getPoolStateAtBlock(pool, blockTag)` (which
+     uses the existing `IRpcProvider.multicall({ blockTag })` plumbing
+     to pin `slot0` to that block) and the new
+     `IRpcProvider.getBlock(blockNumber)` to get the timestamp.
+  4. Convert each `sqrtPriceX96` to a `Price` via
+     `sqrtPriceX96ToPrice(...)`.
+  5. If any step throws (archive node unavailable, RPC rejected
+     the historical block tag, etc.) fall back to a
+     **deterministic synthetic GBM path** anchored at the current
+     price — never block the UI on a partial archive. The DTO's
+     `source` field tells the UI which path produced the series.
+- Default max cost: 200 snapshots. Pass `maxSnapshots: 0` to
+  disable the synthetic fallback and surface the underlying
+  error (useful for testing).
+- Skips the `volatilityFromHistory` call when the price didn't
+  move across the window — common for stablecoin pairs on a
+  short horizon, where the volatility util would otherwise
+  divide by zero.
+
+#### Adapter extension: `getPoolStateAtBlock`
+
+- `IProtocolAdapter.getPoolStateAtBlock(pool, blockNumber): Promise<TPoolState>`
+  is a new optional-ish method. Implemented in both
+  `UniswapV3Adapter` (via `UniswapV3PoolStateReader.readStateAtBlock`)
+  and `ShadowAdapter` (via `ShadowPoolStateReader.readStateAtBlock`).
+- Reads only `slot0` at the historical block; liquidity /
+  fee-growth fields are filled with `0n` (the chart only needs
+  the price, so fetching the rest would just waste RPC budget).
+- Token metadata (`token0`, `token1`, `fee`, `tickSpacing`) is
+  fetched at *latest* (these are constant for a pool).
+
+#### RPC provider fix: `getBlock` bigint support
+
+- `IRpcProvider.getBlock(tag: TBlockTag)` previously forwarded
+  bigint tags as `blockTag: <bigint>` to viem 2.55+, which sends
+  the unprefixed decimal string and makes the RPC reject it
+  with "hex string without 0x prefix". The wrapper now splits
+  the two viem params — bigint → `blockNumber`, string →
+  `blockTag` — so `RpcHistoryProvider.replayBlocks` and the new
+  `getPoolStateAtBlock` both work end-to-end.
+
+#### UI: `ChartsTab` + `PriceChart.client.vue`
+
+- `app/components/PriceChart.client.vue` — Chart.js wrapper.
+  `.client.vue` is the Nuxt 4 convention for client-only
+  components; chart.js touches the DOM and would otherwise break
+  SSR. The page is already wrapped in `<ClientOnly>`, but the
+  suffix belt-and-braces guarantees the import never runs
+  server-side.
+- `app/components/ChartsTab.vue` — presentational tab. Fetches
+  history on mount (and re-fetches when the pool address
+  changes), derives the top-1 strategy from the recommendation
+  DTO via `tickToPrice(tickLower/tickUpper)`, and renders the
+  chart with the strategy box + a dashed "now" line.
+- `app/pages/pool/[pool].vue` — added a fifth tab entry
+  (`{ value: 'charts', label: 'Charts', icon: 'i-lucide-line-chart' }`),
+  a `charts: resolveComponent('ChartsTab')` entry in the
+  `tabComponents` map, and a `case 'charts':` branch in
+  `getTabProps` that forwards `pool`, `chainId`, `protocolId`,
+  `analysis`, and `recommendation`.
+
+#### New dependency
+
+- `chart.js@^4` + `vue-chartjs@^5` + `chartjs-plugin-annotation@^3`
+  (~80kB gzipped). The annotation plugin powers the
+  `box` overlay (top-1 strategy price range) and the
+  `line` overlay (current price marker) natively, so we
+  don't hand-roll any SVG.
+
+#### Verification
+
+- `pnpm typecheck` ✓
+- `pnpm exec nuxt prepare` ✓
+- `pnpm run build` ✓
+- `pnpm smoke:phase10` ✓ — exercises both on-chain history
+  (USDC/WETH 0.05% and WETH/USDT 0.3% on Ethereum mainnet) and
+  the synthetic fallback path. Confirms `getPoolStateAtBlock`
+  returns a non-zero tick at a historical block.
 
 ---
 

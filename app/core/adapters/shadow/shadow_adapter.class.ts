@@ -52,6 +52,34 @@ export class ShadowAdapter implements IProtocolAdapter {
     return this.reader.readFullState(pool);
   }
 
+  async getPoolStateAtBlock(
+    pool: TAddress,
+    blockNumber: bigint,
+  ): Promise<TPoolState> {
+    const meta = await this.reader.readMetadata(pool);
+    const [tokenA, tokenB] = await this.tokens.resolveMany([
+      meta.token0,
+      meta.token1,
+    ]);
+    const { tick, sqrtPriceX96 } = await this.reader.readStateAtBlock(
+      pool,
+      blockNumber,
+    );
+
+    return {
+      pool,
+      token0: tokenA!,
+      token1: tokenB!,
+      fee: meta.fee,
+      tickSpacing: meta.tickSpacing,
+      sqrtPriceX96,
+      tick,
+      liquidity: 0n,
+      feeGrowthGlobal0X128: 0n,
+      feeGrowthGlobal1X128: 0n,
+    };
+  }
+
   async getTicks(
     pool: TAddress,
     range: TTickRange,

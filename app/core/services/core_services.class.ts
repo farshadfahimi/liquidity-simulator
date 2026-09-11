@@ -7,6 +7,7 @@ import {
   SimulatePositionUseCase,
   ReplayHistoricalPerformanceUseCase,
   CompareStrategiesUseCase,
+  GetPoolHistoryUseCase,
   type TAdapterResolver,
 } from '../application/use_cases';
 import { AdapterNotFoundError } from '../application/errors/adapter_not_found_error';
@@ -121,6 +122,11 @@ export class CoreServices {
       simulatePosition: new SimulatePositionUseCase(resolver),
       replayHistoricalPerformance: new ReplayHistoricalPerformanceUseCase(),
       compareStrategies: new CompareStrategiesUseCase(),
+      getPoolHistory: new GetPoolHistoryUseCase(
+        resolver,
+        () => this.rpc(),
+        this.analytics,
+      ),
     };
   }
 }
@@ -166,4 +172,6 @@ export interface ICoreUseCases {
   readonly replayHistoricalPerformance: ReplayHistoricalPerformanceUseCase;
 
   readonly compareStrategies: CompareStrategiesUseCase;
+
+  readonly getPoolHistory: GetPoolHistoryUseCase;
 }

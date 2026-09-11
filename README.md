@@ -787,11 +787,38 @@ Implement
   - Pool details.
   - Recommendation view.
   - Simulation controls.
-  - Charts.
+  - ~~Charts~~ (shipped in **Phase 10** — see below).
   - Strategy comparison.
 
 Deliverables
   - Fully client-side LP analytics application.
+
+---
+
+#### Phase 10 — Charts tab
+
+Closes the Phase 8 "Charts" backlog item. Adds a fifth tab to
+the pool page that renders a Chart.js line chart of the pool's
+recent price history (real on-chain snapshots when the RPC
+exposes archive state, deterministic synthetic GBM fallback
+otherwise) and overlays the **top-1 strategy's recommended
+price band** as a green box annotation so the user can see
+"where to enter" relative to recent price action.
+
+Key pieces:
+  - `IProtocolAdapter.getPoolStateAtBlock(pool, blockNumber)` —
+    new adapter method that pins `slot0` to a historical block
+    via the existing `IRpcProvider.blockTag` plumbing.
+  - `GetPoolHistoryUseCase` — walks the last N blocks, builds
+    a chart-ready `IPoolHistoryDTO`, gracefully falls back to
+    synthetic when the RPC rejects the historical block tag.
+  - `ChartsTab` + `PriceChart.client.vue` — Chart.js + the
+    `chartjs-plugin-annotation` for the strategy range box
+    and the "now" price line.
+
+Also fixes a pre-existing `IRpcProvider.getBlock(bigint)` bug
+where viem 2.55+ requires `blockNumber` (not `blockTag`) for
+bigint block tags.
 
 ---
 

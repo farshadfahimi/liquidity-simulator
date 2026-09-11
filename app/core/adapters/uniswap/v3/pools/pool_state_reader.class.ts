@@ -123,6 +123,37 @@ export class UniswapV3PoolStateReader {
     );
   }
 
+  /**
+   * Read pool state pinned to a specific historical block. We only
+   * call `slot0` (we don't need liquidity / fee-growth for a chart
+   * snapshot) and pin every sub-call to the same `blockTag`. Public
+   * RPCs without archive state will throw — the caller should treat
+   * that as a signal to fall back to a synthetic history.
+   */
+  async readStateAtBlock(
+    pool: TAddress,
+    blockNumber: bigint,
+  ): Promise<{ tick: number; sqrtPriceX96: bigint }> {
+    const [slot0] = await this.rpc.multicall<
+      readonly unknown[]
+    >(
+      [
+        {
+          address: pool,
+          abi: uniswapV3PoolAbi,
+          functionName: 'slot0',
+          blockTag: blockNumber,
+        },
+      ],
+    );
+
+    const slot = slot0 as readonly unknown[];
+    const sqrtPriceX96 = BigInt(slot[0] as bigint);
+    const tick = Number(slot[1] as number);
+
+    return { tick, sqrtPriceX96 };
+  }
+
   async readTicks(
     pool: TAddress,
     range: TTickRange,

@@ -219,6 +219,7 @@ const tabs = [
   { value: 'recommendation', label: 'Recommendation', icon: 'i-lucide-target' },
   { value: 'simulation', label: 'Simulation', icon: 'i-lucide-zap' },
   { value: 'strategies', label: 'Strategies', icon: 'i-lucide-bar-chart-2' },
+  { value: 'charts', label: 'Charts', icon: 'i-lucide-line-chart' },
 ];
 
 // Map tab value -> component. We use a dynamic <component :is>
@@ -235,6 +236,7 @@ const tabComponents: Record<string, ReturnType<typeof resolveComponent>> = {
   recommendation: resolveComponent('RecommendationTab'),
   simulation: resolveComponent('SimulationTab'),
   strategies: resolveComponent('StrategiesTab'),
+  charts: resolveComponent('ChartsTab'),
 };
 
 function getTabProps(value: string): Record<string, unknown> {
@@ -263,6 +265,14 @@ function getTabProps(value: string): Record<string, unknown> {
       };
     case 'strategies':
       return { recommendation: recommendation.value };
+    case 'charts':
+      return {
+        pool: poolAddress.value,
+        chainId: chainId.value,
+        protocolId: protocolId.value,
+        analysis: analysis.value,
+        recommendation: recommendation.value,
+      };
     default:
       return {};
   }
