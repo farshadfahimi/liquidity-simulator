@@ -1,0 +1,22 @@
+/* app/assets/css/main.css
+ *
+ * Tailwind 4 entrypoint. The order matters:
+ *   1. `@import "tailwindcss"` brings in the engine + reset.
+ *   2. `@import "@nuxt/ui"` registers Nuxt UI's CSS variables
+ *      (theme tokens) on top of the Tailwind reset.
+ *
+ * Anything added below this pair takes precedence over both.
+ */
+
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+/* ----------------------------------------------------------------
+ * Global tweaks.
+ * -------------------------------------------------------------- */
+
+html,
+body,
+#__nuxt {
+  height: 100%;
+}

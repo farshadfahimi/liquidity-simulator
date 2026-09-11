@@ -1,0 +1,6 @@
+nodeVersion: 22.23.0
+
+allowBuilds:
+  esbuild: false
+  keccak: false
+  vue-demi: false
