@@ -1700,6 +1700,28 @@ flagged as Phase-9 follow-ups:
   existing `formatIL` / `formatAPR` / `formatVol` helpers.
   The misleading comment in `PoolDetailsTab.vue` was
   replaced with an accurate one.
+- **Simulation tab renderer.** Phase 9 slice 2 extracted the
+  Simulation tab into `app/components/SimulationTab.vue`,
+  but the results block was a one-line placeholder
+  (`"Use the canonical use cases (...)"`) that the user saw
+  every time they clicked "Run simulation". The tab now
+  renders every block the `simulatePosition.execute(...)`
+  use case actually populates: **Quote** (liquidity,
+  amount0, amount1), **Deposit** (deposit-side amounts and
+  notional in the selected numeraire), **Future price
+  scenario** (terminal price / value / IL / horizon) when
+  supplied, **Historical replay** (APR, mean/min/max/final
+  IL, time-in-range, max drawdown, total fees, replay
+  window) when supplied, and **Monte Carlo** (paths,
+  mean / P05 / P50 / P95 of terminal value & IL,
+  time-in-range) when supplied. Each block renders only if
+  its corresponding DTO field is non-null. The page also
+  computes `token0Amount` from the user-typed `principal` +
+  `currentPrice` so the position is correctly sized when
+  the numeraire is `token1` (WETH / etc.). New helpers in
+  `formatDtos.ts`: `formatTokenAmount(raw, decimals)`,
+  `formatPriceShort(raw, priceDecimals)`, and
+  `formatSeconds(bigint)` for the time strings.
 
 #### What's still Phase 9 backlog
 

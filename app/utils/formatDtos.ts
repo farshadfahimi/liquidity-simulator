@@ -86,6 +86,44 @@ export function formatTickRange(lo: number, hi: number): string {
 }
 
 /**
+ * Bigint raw-units -> compact human string, given the token's
+ * decimals. Thin wrapper over `formatAmountShort` that fixes the
+ * `fractionDigits` at 6 — that's enough precision for any
+ * on-chain display without spamming trailing zeros.
+ */
+export function formatTokenAmount(raw: bigint, decimals: number): string {
+  return formatAmountShort(raw, decimals, 6);
+}
+
+/**
+ * Compact numeraire price: `1.2345` at `priceDecimals`. Mirrors
+ * `formatTokenAmount` semantically but kept as its own helper so
+ * the call site reads clearly.
+ */
+export function formatPriceShort(raw: bigint, priceDecimals: number): string {
+  return formatAmountShort(raw, priceDecimals, 6);
+}
+
+/**
+ * `bigint` seconds -> `"Nd HH:MM:SS"`-style human string. Used
+ * for simulation horizons and total replay time.
+ */
+export function formatSeconds(totalSeconds: bigint): string {
+  const sec = Number(totalSeconds);
+  if (!Number.isFinite(sec) || sec < 0) return '—';
+  if (sec < 60) return `${sec.toFixed(0)}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${(sec % 60).toFixed(0)}s`;
+  if (sec < 86400) {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    return `${h}h ${m.toFixed(0)}m`;
+  }
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  return `${d}d ${h}h`;
+}
+
+/**
  * Truncate an address for compact display: 0x1234…abcd.
  */
 export function shortAddress(addr: string | `0x${string}`): string {

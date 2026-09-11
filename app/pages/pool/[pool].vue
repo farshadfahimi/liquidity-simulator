@@ -9,7 +9,7 @@
 
 import type { TAddress } from '@core/shared/types';
 import { Pool } from '@core/domains/pool';
-import type { IPoolAnalysisDTO, IRecommendationDTO } from '@core/application/dtos';
+import type { IPoolAnalysisDTO, IRecommendationDTO, IPositionSimulationDTO } from '@core/application/dtos';
 
 definePageMeta({
   layout: 'default',
@@ -129,7 +129,7 @@ watch(analysis, (a) => {
   }
 });
 
-const simulation = ref<unknown>(null);
+const simulation = ref<IPositionSimulationDTO | null>(null);
 const isSimulating = ref(false);
 const simulationError = ref<string | null>(null);
 
@@ -143,6 +143,29 @@ async function runSimulation() {
   try {
     const { simulatePosition } = useCases();
     const principalBig = BigInt(principal.value || '0');
+
+    // `simulatePosition` sizes the position via `token0Amount` (raw
+    // units of token0). The form's `principal` is in *numeraire* raw
+    // units, so we convert at the current pool price. If the analysis
+    // hasn't loaded yet we pass 0n; the historical / Monte Carlo
+    // blocks still use `principalInNumeraire` directly so they're
+    // unaffected.
+    let token0Amount = 0n;
+    if (principalBig > 0n && analysis.value) {
+      const cp = analysis.value.currentPrice;
+      const t0Dec = analysis.value.token0.decimals;
+      if (numeraire.value === 'token0') {
+        token0Amount = principalBig;
+      }
+      else if (cp > 0n) {
+        // price is `token1 per token0` at `currentPriceDecimals`.
+        // We want `token0` raw units for a given `token1` notional.
+        //   token0_raw = principal_token1_raw * (1 / price)
+        //              = principal * 10^t0Dec / price
+        token0Amount = (principalBig * 10n ** BigInt(t0Dec)) / cp;
+      }
+    }
+
     const result = await simulatePosition.execute({
       pool: poolAddress.value as TAddress,
       chainId: chainId.value,
@@ -150,6 +173,7 @@ async function runSimulation() {
       range: { tickLower: tickLower.value, tickUpper: tickUpper.value },
       principalInNumeraire: principalBig,
       numeraireToken: numeraire.value,
+      token0Amount,
     });
     simulation.value = result;
   }
@@ -231,7 +255,11 @@ function getTabProps(value: string): Record<string, unknown> {
         numeraire: numeraire.value,
         loading: isSimulating.value,
         error: simulationError.value,
-        hasResult: simulation.value !== null,
+        result: simulation.value,
+        token0Symbol: analysis.value?.token0.symbol ?? 'token0',
+        token1Symbol: analysis.value?.token1.symbol ?? 'token1',
+        token0Decimals: analysis.value?.token0.decimals ?? 18,
+        token1Decimals: analysis.value?.token1.decimals ?? 18,
       };
     case 'strategies':
       return { recommendation: recommendation.value };
