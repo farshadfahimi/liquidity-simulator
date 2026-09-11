@@ -7,10 +7,12 @@
 // expects a fully-loaded `IPoolAnalysisDTO` (or `null` while
 // loading).
 //
-// `formatAmountShort` is auto-imported from
-// `app/core/shared/utils` (via the `@core/*` alias).
-// `formatIL` / `formatAPR` / `formatVol` / etc. come from
-// `app/utils/formatDtos.ts` (Nuxt auto-import).
+// All formatting helpers (`formatAmountShort`, `formatIL`,
+// `formatAPR`, `formatVol`, etc.) are auto-imported from
+// `app/utils/formatDtos.ts`, which itself re-exports
+// `formatAmountShort` from `@core/shared/utils` to make it
+// available through the standard Nuxt auto-import scan of
+// `app/utils/`.
 
 import type { IPoolAnalysisDTO } from '@core/application/dtos';
 

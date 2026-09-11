@@ -10,9 +10,17 @@
  * plain string the Vue template can render. We deliberately do
  * *not* use `Intl.NumberFormat` here because Phase 8 runs in the
  * browser and the scale math should never be lossy on rounding.
+ *
+ * This module also re-exports a few pure-utility helpers from
+ * `@core/shared/utils` so that Nuxt's standard auto-import
+ * (which scans `app/utils/`) makes them available in templates
+ * without an explicit import line in every component.
  */
 
 import { APR_SCALE, IL_SCALE, SCORE_SCALE, VOLATILITY_SCALE } from '@core/math';
+import { formatAmountShort } from '@core/shared/utils';
+
+export { formatAmountShort };
 
 /**
  * One ratio at `IL_SCALE` (1e18 == 1.0). Returns a percentage

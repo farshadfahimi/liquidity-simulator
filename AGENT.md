@@ -874,7 +874,10 @@ Nuxt 4 conventions in §4.10. Future additions:
   `TokenSelect.vue` (the icon + symbol dropdown used for
   Token A / Token B in the Discover form).
 - `app/utils/` currently only has `formatDtos.ts`. Phase 9+
-  will add chart helpers and bigint→DOM helpers.
+  will add chart helpers and bigint→DOM helpers. `formatDtos.ts`
+  also re-exports a few pure helpers from `@core/shared/utils`
+  (currently `formatAmountShort`) so they pick up Nuxt's
+  standard `app/utils/` auto-import scan.
 
 ### 6.11 Phase 4 — Mathematical Engine (done)
 Phase 4 ships the math engine on top of the math tick scaffold from
@@ -1666,6 +1669,37 @@ flagged as Phase-9 follow-ups:
   plain TS).
 - `pnpm typecheck`, `pnpm exec nuxt prepare`, and `pnpm run build`
   all pass clean after the slice 6 changes.
+
+#### Post-slice-6 polish (no version bump)
+
+- **Pool page tab crash fix.** The original `UTabs` `#content`
+  slot used a `v-if`/`v-else-if` chain over the four tab
+  components. When the user navigated to a second pool page
+  while a non-first tab was active (the page component is
+  reused, so `selectedTab` is preserved), Reka UI's
+  `<Presence>` wrapper — which `unmountOnHide: true` requires
+  for every `<TabsContent>` — threw *"Unhandled error during
+  execution of watcher callback"* during the in-place
+  re-mount, leaving every tab body empty. The fix has two
+  parts: (1) the slot now uses `<component :is="tabComponents[item.value]">`
+  with a `getTabProps(item.value)` helper so each `<TabsContent>`
+  gets exactly one component child instead of a four-branch
+  conditional fragment; (2) a `watch(poolAddress)` resets
+  `selectedTab` (and the analysis/recommendation/simulation
+  refs) to a clean state on every new pool, so the
+  cross-page state-preservation issue cannot recur.
+- **`formatAmountShort` auto-import.** The previous comment
+  in `PoolDetailsTab.vue` claimed `formatAmountShort` was
+  auto-imported from `app/core/shared/utils` via the
+  `@core/*` alias, but Nuxt's auto-import scan only covers
+  `app/utils/`. The function was therefore undefined at
+  runtime and the "Pool Details" tab crashed the first time
+  it tried to render a price. `app/utils/formatDtos.ts` now
+  re-exports `formatAmountShort` from `@core/shared/utils`,
+  so it picks up the standard auto-import alongside the
+  existing `formatIL` / `formatAPR` / `formatVol` helpers.
+  The misleading comment in `PoolDetailsTab.vue` was
+  replaced with an accurate one.
 
 #### What's still Phase 9 backlog
 

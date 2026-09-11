@@ -164,6 +164,22 @@ async function runSimulation() {
 // -----------------------------------------------------------------
 // Lifecycle
 // -----------------------------------------------------------------
+// When the user navigates between pool pages, the page component
+// is reused and `selectedTab` is preserved. That used to put the
+// details tab in `present=false` state at mount, which Reka UI's
+// <Presence> wrapper mishandled under `unmountOnHide: true` and
+// threw "Unhandled error during execution of watcher callback".
+// Resetting to 'details' on each new pool address keeps the
+// initial tab predictable.
+watch(poolAddress, () => {
+  selectedTab.value = 'details';
+  recommendation.value = null;
+  simulation.value = null;
+  analysisError.value = null;
+  recommendationError.value = null;
+  simulationError.value = null;
+});
+
 onMounted(async () => {
   await loadAnalysis();
   if (analysis.value) {
@@ -180,6 +196,49 @@ const tabs = [
   { value: 'simulation', label: 'Simulation', icon: 'i-lucide-zap' },
   { value: 'strategies', label: 'Strategies', icon: 'i-lucide-bar-chart-2' },
 ];
+
+// Map tab value -> component. We use a dynamic <component :is>
+// rather than a v-if chain inside UTabs' #content slot because
+// the chain compiles to a comment-vnode fragment which interacts
+// badly with Reka UI's <Presence> wrapper under `unmountOnHide: true`
+// when the active tab is not the first one (e.g. when navigating
+// between pool pages while `selectedTab` is preserved).
+//
+// `resolveComponent` is used because the tab components are
+// Nuxt-auto-imported (not present in the local script scope).
+const tabComponents: Record<string, ReturnType<typeof resolveComponent>> = {
+  details: resolveComponent('PoolDetailsTab'),
+  recommendation: resolveComponent('RecommendationTab'),
+  simulation: resolveComponent('SimulationTab'),
+  strategies: resolveComponent('StrategiesTab'),
+};
+
+function getTabProps(value: string): Record<string, unknown> {
+  switch (value) {
+    case 'details':
+      return { analysis: analysis.value, loading: isLoadingAnalysis.value };
+    case 'recommendation':
+      return {
+        recommendation: recommendation.value,
+        loading: isLoadingRecommendation.value,
+        error: recommendationError.value,
+      };
+    case 'simulation':
+      return {
+        tickLower: tickLower.value,
+        tickUpper: tickUpper.value,
+        principal: principal.value,
+        numeraire: numeraire.value,
+        loading: isSimulating.value,
+        error: simulationError.value,
+        hasResult: simulation.value !== null,
+      };
+    case 'strategies':
+      return { recommendation: recommendation.value };
+    default:
+      return {};
+  }
+}
 
 const selectedTab = ref('details');
 
@@ -211,36 +270,15 @@ function goBack() {
         <ClientOnly>
           <UTabs v-model="selectedTab" :items="tabs" class="w-full">
             <template #content="{ item }">
-              <PoolDetailsTab
-                v-if="item.value === 'details'"
-                :analysis="analysis"
-                :loading="isLoadingAnalysis"
-              />
-              <RecommendationTab
-                v-else-if="item.value === 'recommendation'"
-                :recommendation="recommendation"
-                :loading="isLoadingRecommendation"
-                :error="recommendationError"
+              <component
+                :is="tabComponents[item.value]"
+                v-bind="getTabProps(item.value)"
                 @rerun="loadRecommendation"
-              />
-              <SimulationTab
-                v-else-if="item.value === 'simulation'"
-                :tick-lower="tickLower"
-                :tick-upper="tickUpper"
-                :principal="principal"
-                :numeraire="numeraire"
-                :loading="isSimulating"
-                :error="simulationError"
-                :has-result="simulation !== null"
                 @update:tick-lower="(v: number) => (tickLower = v)"
                 @update:tick-upper="(v: number) => (tickUpper = v)"
                 @update:principal="(v: string) => (principal = v)"
                 @update:numeraire="(v: 'token0' | 'token1') => (numeraire = v)"
                 @run="runSimulation"
-              />
-              <StrategiesTab
-                v-else-if="item.value === 'strategies'"
-                :recommendation="recommendation"
               />
             </template>
           </UTabs>
