@@ -29,9 +29,10 @@ export interface IGetPoolHistoryInput {
 
   /**
    * How many snapshots to fetch. The use case walks the most recent
-   * `numSnapshots` blocks spaced by `blockStep`. Default 60 — gives
-   * a couple of hours of Ethereum mainnet data at 12s blocks
-   * (`blockStep = 200`).
+   * `numSnapshots` blocks spaced by `blockStep`. Default 30 — gives
+   * ~10 minutes of Ethereum mainnet data at 12s blocks
+   * (`blockStep = 200`). Fetches are issued in parallel, so a
+   * smaller window only trims the chart, not the latency.
    */
   readonly numSnapshots?: number;
 
@@ -63,20 +64,20 @@ export interface IGetPoolHistoryInput {
 
 /**
  * Per-chain default block step (in blocks). These are picked so
- * `numSnapshots=60` gives roughly the "last few hours" of activity.
- * The same value is fine for any V3 / V3-compatible chain — these
- * constants are block counts, not seconds.
+ * `numSnapshots=30` gives a useful chart window without flooding
+ * the public RPC. The same value is fine for any V3 / V3-compatible
+ * chain — these constants are block counts, not seconds.
  */
 const DEFAULT_BLOCK_STEP: Readonly<Record<number, bigint>> = {
-  1: 200n, // Ethereum mainnet — 12s blocks, ~40 min total window
-  42161: 200n, // Arbitrum — ~0.25s blocks, ~50s total (mostly noise)
-  8453: 600n, // Base — 2s blocks, ~20 min total
-  146: 600n, // Sonic — 2s blocks, ~20 min total
+  1: 200n, // Ethereum mainnet — 12s blocks, ~10 min total window
+  42161: 200n, // Arbitrum — ~0.25s blocks, ~7s total (mostly noise)
+  8453: 600n, // Base — 2s blocks, ~10 min total
+  146: 600n, // Sonic — 2s blocks, ~10 min total
 };
 
-const DEFAULT_NUM_SNAPSHOTS = 60;
+const DEFAULT_NUM_SNAPSHOTS = 30;
 const DEFAULT_MAX_SNAPSHOTS = 200;
-const SYNTHETIC_NUM_SNAPSHOTS = 60;
+const SYNTHETIC_NUM_SNAPSHOTS = 30;
 const SYNTHETIC_DEFAULT_SIGMA: bigint = 500_000_000_000_000_000n; // 50% annual
 
 /**
@@ -243,31 +244,34 @@ export class GetPoolHistoryUseCase {
       }
     }
 
-    const snapshots: IHistorySnapshotDTO[] = [];
+    // Issue every (state + block) pair in parallel. With 30
+    // snapshots on a public mainnet RPC this turns ~15s of
+    // sequential round-trips into a single batch of ~1s.
+    const snapshots = await Promise.all(
+      blockNumbers.map(async (blockNumber) => {
+        // Fetch state pinned to this block, plus the block's
+        // timestamp, in parallel.
+        const [pinned, block] = await Promise.all([
+          adapter.getPoolStateAtBlock(pool, blockNumber),
+          rpc.getBlock(blockNumber),
+        ]);
 
-    for (const blockNumber of blockNumbers) {
-      // Fetch state pinned to this block, plus the block's
-      // timestamp, in parallel.
-      const [pinned, block] = await Promise.all([
-        adapter.getPoolStateAtBlock(pool, blockNumber),
-        rpc.getBlock(blockNumber),
-      ]);
+        const price = sqrtPriceX96ToPrice(
+          pinned.sqrtPriceX96,
+          token0Decimals,
+          token1Decimals,
+          priceDecimals,
+        );
 
-      const price = sqrtPriceX96ToPrice(
-        pinned.sqrtPriceX96,
-        token0Decimals,
-        token1Decimals,
-        priceDecimals,
-      );
-
-      snapshots.push({
-        blockNumber,
-        timestamp: block.timestamp,
-        tick: pinned.tick,
-        price: price.value,
-        priceDecimals: price.decimals,
-      });
-    }
+        return {
+          blockNumber,
+          timestamp: block.timestamp,
+          tick: pinned.tick,
+          price: price.value,
+          priceDecimals: price.decimals,
+        };
+      }),
+    );
 
     return snapshots;
   }
