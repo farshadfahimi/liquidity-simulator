@@ -631,14 +631,19 @@ wrappers in pages):
   Used by `DiscoverForm.vue` to seed the dropdowns and by
   `pages/pool/[pool].vue` to fill in `protocolId` for direct
   URL loads that omit the query param.
-- `app/composables/useRpcOverride.ts` — Phase 9. Per-chain
-  user-pinned RPC URLs in `localStorage` (`lp:v1:rpcOverrides`).
-  Read by `app/plugins/core.client.ts` at boot and folded into
-  `TNetwork.rpcUrls` (prepended, so the override wins) before
-  the `NetworkProvider` is constructed. Edited from the UI by
-  `app/components/RpcSettings.vue` (the slideover on the
-  Discover page). This is the *only* RPC override path —
-  there is no env-var escape hatch.
+- `app/composables/useRpcOverride.ts` — Phase 9 + Phase 11.
+  Per-chain user-pinned RPC config in `localStorage`
+  (`lp:v1:rpcConfigs`). The config carries both URL and
+  auth headers so paid providers (Alchemy, Infura, Tenderly,
+  Ankr) work alongside raw private-node URLs. Read by
+  `app/plugins/core.client.ts` at boot and folded into
+  `TNetwork.rpcUrls` (prepended) and `TNetwork.rpcHeaders`
+  before the `NetworkProvider` is constructed. Edited from
+  the UI by `app/components/RpcSettings.vue` (the slideover
+  on the Discover page). Legacy `lp:v1:rpcOverrides` data
+  (Phase 9 single-string shape) is migrated in-place on
+  first read. This is the *only* RPC override path — there
+  is no env-var escape hatch.
 - `app/composables/useTokenList.ts` — Phase 9 slices 5 + 6.
   Reactive accessor for the active `(chainId, protocolId)`'s
   token universe. Starts from the static curated list
@@ -1620,24 +1625,30 @@ flagged as Phase-9 follow-ups:
    empty before Phase 9; Nuxt's component scanner picks them up
    automatically (no manual `import` in pages).
 
-3. **User-pinned RPC URLs (slice 4).** End users can now pin a
-   personal endpoint (Alchemy / Infura / private node) through
-   a settings drawer on the Discover page header. The drawer
-   reads/writes `app/composables/useRpcOverride.ts`, which
-   stores `Record<chainId, url>` under `lp:v1:rpcOverrides`.
-   `app/plugins/core.client.ts` reads that map at boot and
-   *prepends* each override to the corresponding
-   `TNetwork.rpcUrls` before constructing the
-   `NetworkProvider`, so the user's endpoint wins; viem's
-   `fallback` transport still tries the public URLs on
-   transport-level failure. The drawer is a `USlideover` on
-   `app/pages/index.vue` and renders `RpcSettings.vue`,
-   which has one `UInput` + Save/Clear per bundled chain.
-   This is the *only* RPC override path — the previous
-   `VITE_*` env-var escape hatch was removed in slice 4
-   (`.env.example` deleted, the `DEV_*_RPC` blocks stripped
-   from every `*.const.ts`) so end users have a single
-   source of truth.
+3. **User-pinned RPC config (slice 4 + Phase 11).** End users
+   can pin a personal endpoint (Alchemy / Infura / Ankr /
+   Tenderly / private node) through a settings drawer on the
+   Discover page header. The drawer reads/writes
+   `app/composables/useRpcOverride.ts`, which stores
+   `Record<chainId, IRpcConfig>` under `lp:v1:rpcConfigs`
+   (the Phase 11 shape carries `{ preset?, url?, headers?, key? }`
+   so paid providers can authenticate via header rather than
+   URL-embed). Legacy `lp:v1:rpcOverrides` data is migrated
+   in-place on first read. `app/plugins/core.client.ts` reads
+   the config at boot and (a) prepends the URL to the
+   corresponding `TNetwork.rpcUrls` and (b) folds the auth
+   headers onto `TNetwork.rpcHeaders` — so the user's
+   endpoint wins, and viem's `fallback` transport still tries
+   the public URLs on transport-level failure (which simply
+   ignore the extra auth headers). The drawer is a
+   `USlideover` on `app/pages/index.vue` and renders
+   `RpcSettings.vue`, which shows a preset dropdown + a
+   masked key field (or a raw-URL field for the "Custom"
+   preset) per bundled chain. This is the *only* RPC
+   override path — the previous `VITE_*` env-var escape
+   hatch was removed in slice 4 (`.env.example` deleted,
+   the `DEV_*_RPC` blocks stripped from every `*.const.ts`)
+   so end users have a single source of truth.
 
 4. **Multicall3 on every bundled chain (slice 4).** Added
    `multicall3Address: '0xca11bde0...ca11'` to Arbitrum /
@@ -1853,21 +1864,37 @@ The end-user RPC override path. The only one — there is no
 env-var escape hatch.
 
 - **`app/composables/useRpcOverride.ts`** — a tiny client-only
-  composable that stores `Record<chainId, url>` under
-  `lp:v1:rpcOverrides` in `localStorage`. Exposes
-  `getOverride(chainId)`, `setOverride(chainId, url)`,
-  `clearOverride(chainId)`, and `clearAll()`. SSR-safe
+  composable that stores `Record<chainId, IRpcConfig>` under
+  `lp:v1:rpcConfigs` in `localStorage`. The `IRpcConfig` shape
+  (added in the Phase 11 access-key slice) carries
+  `{ preset?, url?, headers?, key? }` so a single entry can
+  describe both a URL-embed override (Alchemy / Infura / Ankr)
+  and a header-auth override (Tenderly, private nodes). Legacy
+  `lp:v1:rpcOverrides` data is read once, migrated in-place to
+  the new shape, and the legacy key is deleted (best-effort).
+  Exposes `getConfig(chainId)`, `getOverride(chainId)`,
+  `getHeaders(chainId)`, `setConfig(chainId, cfg)`,
+  `setOverride(chainId, url)` (legacy convenience), and
+  `clearConfig` / `clearOverride` / `clearAll`. SSR-safe
   (`import.meta.client` guard) and quota-safe (every read/write
   is in a `try/catch`).
 - **`app/plugins/core.client.ts`** reads the override map at
-  plugin boot and *prepends* each pinned URL to the
-  corresponding chain's `TNetwork.rpcUrls` before constructing
-  the `NetworkProvider`. The override wins; viem's
-  `fallback` transport still cycles through the public
-  endpoints on transport-level failure.
-- **`app/components/RpcSettings.vue`** is the UI: one
-  `UInput` per bundled chain with Save / Clear buttons,
-  `useToast` feedback on save/clear, http(s) URL validation.
+  plugin boot, prepends the pinned URL to the chain's
+  `TNetwork.rpcUrls` (when present), and folds the pinned
+  headers onto `TNetwork.rpcHeaders` (when present). The
+  override wins for both URL and auth; viem's `fallback`
+  transport still cycles through the public endpoints on
+  transport-level failure, and the same headers ride every
+  request in the fallback list (public endpoints simply ignore
+  unknown auth headers).
+- **`app/components/RpcSettings.vue`** is the UI: per-chain
+  preset dropdown + a single masked key field (or a raw URL
+  field for "Custom"), with Save / Clear buttons and
+  `useToast` feedback. http(s) URL validation for the Custom
+  flow; key validation is "non-empty" for the preset flows
+  because we can't probe a live RPC from inside a form input.
+  See the **Access-key slice** below for the preset list and
+  URL/header expansion.
 - **`app/pages/index.vue`** wires it into a `USlideover`
   opened from a "Custom RPC" button in the Discover page
   header.
@@ -1889,6 +1916,71 @@ env-var escape hatch.
   must pin a personal endpoint (Alchemy / Infura / private
   node) through the settings drawer to recover.
 
+#### Access-key slice (Phase 11)
+
+Phase 11 extends slice 4 to cover paid providers whose auth
+shape can't be expressed as a URL alone. Alchemy accepts both
+`/v2/<key>` URL-embed and an `x-api-key` header; Infura's
+newer guidance is `Authorization: Bearer <key>`; Tenderly
+forks require two headers (`X-Forwarded-User`,
+`X-Forwarded-Key`); private nodes usually expect a bearer
+token. The slice adds:
+
+- **`TNetwork.rpcHeaders?: Readonly<Record<string, string>>`**
+  — new optional field on the network value-object. Empty /
+  undefined for the bundled public RPCs; populated by the
+  plugin from the user's pinned key at boot.
+- **`RpcProvider` + `createRpcProvider` factory** — accept an
+  optional `rpcHeaders` map. Headers are forwarded to viem's
+  `http(url, { fetchOptions: { headers } })` transport so they
+  ride every request in the fallback list. Public endpoints
+  ignore unknown auth headers, so mixing authenticated and
+  unauthenticated URLs in the same fallback list is
+  harmless (if ugly).
+- **`NetworkProvider.rpc()`** reads
+  `network.rpcHeaders` and passes it through to the factory.
+  No new state on the provider; headers are read off the
+  current `TNetwork` at provider-build time.
+- **`app/core/providers/rpc/provider_presets.ts`** — a tiny
+  catalogue of paid-provider presets:
+  - `alchemy` → URL-embed (`https://<chainSlug>.g.alchemy.com/v2/<KEY>`)
+  - `infura` → URL-embed (`https://<chainSlug>.infura.io/v3/<KEY>`)
+  - `ankr` → URL-embed (`https://rpc.ankr.com/<chainSlug>/<KEY>`)
+  - `tenderly` → header (`X-Forwarded-Key: <KEY>`,
+    URL embeds a per-secret username slug)
+  - `custom` → escape hatch (raw URL, no headers)
+
+  `buildPresetUrl(preset, chainId, key)` and
+  `buildPresetHeaders(preset, key)` are pure functions the
+  UI calls on save. Keys with special characters are
+  URL-encoded; chain slugs (`eth-mainnet` / `arb-mainnet` /
+  `base-mainnet` / `sonic-mainnet`) match each provider's
+  commercial host naming so users can paste a key from the
+  dashboard without editing the URL.
+- **`useRpcOverride` shape** — the on-disk value is now
+  `Record<chainId, IRpcConfig>` where
+  `IRpcConfig = { preset?, url?, headers?, key? }`. Legacy
+  `Record<chainId, string>` data is read once on first boot
+  post-upgrade, converted to `{ preset: 'custom', url }`,
+  and persisted under the new key `lp:v1:rpcConfigs`. The
+  legacy key (`lp:v1:rpcOverrides`) is removed best-effort;
+  if the remove fails (private mode / quota), the migration
+  simply runs again on the next boot — idempotent and safe.
+- **`RpcSettings.vue`** swaps the single URL field for a
+  **preset dropdown + masked key field** (or, for "Custom",
+  the same raw-URL field as before). The key input is
+  `type="password"` with an eye-icon toggle; presets that
+  send a header (Tenderly today) show a small inline note
+  like "Sent as header: `X-Forwarded-Key: xxxx…xxxx`" so the
+  user knows exactly what's being transmitted. The "stored
+  locally in your browser only" disclosure is now
+  first-class in the footer.
+- **Scope.** This slice covers **JSON-RPC only.** The token-
+  list fetcher (`useTokenList.ts`) hits Shadow's REST API
+  and Uniswap's default-token-list on jsDelivr; some of those
+  endpoints may eventually need API keys too, but they're a
+  different code path and a separate follow-up.
+
 #### Dependency-rule compliance
 
 - Core-only change in slice 2 — `app/composables/**`,
@@ -1901,8 +1993,27 @@ env-var escape hatch.
 - `IRpcProvider` interface signature unchanged across all
   four slices — `NetworkProvider`, `CoreServices`, and the
   history provider didn't need updates.
-- `pnpm typecheck`, `pnpm exec nuxt prepare`, `pnpm run build`
-  all pass clean.
+- **Phase 11** adds `TNetwork.rpcHeaders` (new optional
+  field), broadens `RpcProvider` / `createRpcProvider` with
+  an optional `rpcHeaders` constructor argument, and threads
+  the field through `NetworkProvider.rpc()`. The interface
+  itself (`IRpcProvider`) is still unchanged — every existing
+  call site continues to build without modification, and the
+  headers flow through `viem`'s transport options rather
+  than the public RPC surface.
+- **Backward-compat migration** in `useRpcOverride` is
+  idempotent and silent: existing users who pinned a raw URL
+  in slice 4 see their config auto-promoted to
+  `preset: 'custom'` on first reload, with no UI breakage.
+- **Tests added** — `app/core/test/providers/provider_presets.test.ts`
+  covers preset lookup, slug map, URL expansion (including
+  special-character encoding), and header-template
+  substitution. `app/core/test/providers/rpc_provider_headers.test.ts`
+  pokes viem's internal transport tree to verify the headers
+  reach every transport in the fallback list (and that the
+  no-headers path is unchanged).
+- `pnpm typecheck`, `pnpm exec nuxt prepare`, `pnpm run build`,
+  `pnpm test` (57 tests across 9 files) all pass clean.
 
 ---
 

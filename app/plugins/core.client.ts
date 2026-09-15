@@ -56,20 +56,37 @@ import type { TNetwork } from '@core/shared/types';
 
 export default defineNuxtPlugin(() => {
   // -----------------------------------------------------------------
-  // [0] User-pinned RPC overrides (Phase 9 slice 4).
+  // [0] User-pinned RPC overrides (Phase 9 slice 4 + Phase 11
+  //     access-key slice).
   //
   // End users can pin a personal endpoint (Alchemy / Infura /
   // Tenderly fork / private node) via the settings drawer on
   // the Discover page. Those overrides live in localStorage and
   // are read here at plugin boot so the rest of the app — which
-  // only knows about `TNetwork.rpcUrls` — picks them up
-  // transparently. The override, when present, is *prepended*
-  // to the chain's public fallback list so it wins; viem's
-  // `fallback` transport will still try the public URLs on
-  // failure (see AGENT.md §6.17).
+  // only knows about `TNetwork.rpcUrls` and `TNetwork.rpcHeaders`
+  // — picks them up transparently.
+  //
+  // The user-pinned entry, when present, is composed of:
+  //
+  //   - `url`       — a fully-built URL (preset-expanded if the
+  //                   user picked a paid provider, raw if they
+  //                   picked "Custom"). Prepended to the chain's
+  //                   public fallback list so it wins.
+  //   - `headers`   — auth headers (Alchemy/Infura header mode,
+  //                   Tenderly, private-node bearer tokens).
+  //                   Forwarded to viem's `http()` transport as
+  //                   `fetchOptions.headers` so they ride every
+  //                   request made through the chain's RPC.
+  //
+  // viem's `fallback` transport still cycles through the public
+  // URLs on transport-level failure (see AGENT.md §6.17). The
+  // auth headers are sent on every request in the fallback list;
+  // that's intentional — public fallbacks will simply ignore
+  // incoming `x-api-key` headers.
   //
   // The override map is per-chain and may be empty, in which
-  // case the bundled `TNetwork.rpcUrls` list is used as-is.
+  // case the bundled `TNetwork.rpcUrls` list is used as-is and
+  // no extra headers are sent.
   // -----------------------------------------------------------------
   const rpcOverrides = useRpcOverride();
 
@@ -81,13 +98,26 @@ export default defineNuxtPlugin(() => {
   };
 
   function withOverride(network: TNetwork): TNetwork {
-    const override = rpcOverrides.getOverride(network.id);
-    if (!override) return network;
-    return {
-      ...network,
-      rpcUrls: [override, ...network.rpcUrls],
-      rpcUrl: override,
-    };
+    const cfg = rpcOverrides.getConfig(network.id);
+    const headers = cfg.headers;
+    const url = cfg.url;
+
+    if (!url && (!headers || Object.keys(headers).length === 0)) {
+      return network;
+    }
+
+    const next: TNetwork = { ...network };
+
+    if (url && url.length > 0) {
+      next.rpcUrls = [url, ...network.rpcUrls];
+      next.rpcUrl = url;
+    }
+
+    if (headers && Object.keys(headers).length > 0) {
+      next.rpcHeaders = headers;
+    }
+
+    return next;
   }
 
   // -----------------------------------------------------------------

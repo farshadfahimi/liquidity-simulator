@@ -34,6 +34,24 @@ export interface TNetwork {
    */
   rpcUrl: string;
 
+  /**
+   * Optional HTTP headers attached to *every* request made
+   * through this chain's RPC provider. Used for paid providers
+   * that authenticate via header (Alchemy's `x-api-key`,
+   * Infura's `Authorization: Bearer <KEY>`, Tenderly's
+   * `X-Forwarded-User` / `X-Forwarded-Key`, private nodes
+   * with bearer tokens). Empty / undefined for the bundled
+   * public RPCs.
+   *
+   * When the user pins a key through `useRpcOverride`, the
+   * plugin folds the resulting header map onto the chain's
+   * `TNetwork.rpcHeaders` at boot (see `core.client.ts`).
+   *
+   * Phase 11 — added alongside the access-key slice of the
+   * RPC override path. See AGENT.md §6.17.
+   */
+  rpcHeaders?: Readonly<Record<string, string>>;
+
   explorerUrl?: string;
 
   nativeCurrency: TNativeCurrency;

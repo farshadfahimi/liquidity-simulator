@@ -24,6 +24,19 @@ export interface ICreateRpcProviderOptions {
    * know about a single URL. If both are passed, `rpcUrls` wins.
    */
   rpcUrl?: string;
+
+  /**
+   * Optional HTTP headers attached to every request through this
+   * provider. Phase 11 — populated from `TNetwork.rpcHeaders`
+   * which the user-pinned access-key composable
+   * (`useRpcOverride`) writes to. Forwarded to viem as
+   * `fetchOptions.headers` so Alchemy / Infura / Tenderly /
+   * private-node authentication reaches the network.
+   *
+   * Defaults to `undefined` (no extra headers), which is what
+   * the bundled public RPCs need.
+   */
+  rpcHeaders?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -48,5 +61,9 @@ export function createRpcProvider(
     );
   }
 
-  return new RpcProvider({ chain: opts.chain, rpcUrls: urls });
+  return new RpcProvider({
+    chain: opts.chain,
+    rpcUrls: urls,
+    ...(opts.rpcHeaders ? { rpcHeaders: opts.rpcHeaders } : {}),
+  });
 }

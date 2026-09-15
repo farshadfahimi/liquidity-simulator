@@ -25,7 +25,11 @@ import {
 } from '@core/domains';
 import { Position } from '@core/domains/position';
 import { createPoolHistory } from '@core/domains/history';
-import { Price, TickRange, sqrtPriceX96ToPrice, sqrtRatioAtTick } from '@core/shared/value_objects';
+import { Price, TickRange, sqrtPriceX96ToPrice } from '@core/shared/value_objects';
+// `sqrtRatioAtTick` lives in `@core/math` (not `@core/shared/value_objects`)
+// — the previous import was a latent typo that only manifested when
+// module init order changed; see Phase 11 access-key slice commit.
+import { sqrtRatioAtTick } from '@core/math';
 import { PRICE_DECIMALS } from '../test-constants';
 import {
   SECONDS_PER_DAY,

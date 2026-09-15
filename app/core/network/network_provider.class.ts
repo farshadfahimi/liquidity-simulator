@@ -39,6 +39,12 @@ export class NetworkProvider implements INetworkProvider {
       rpc = createRpcProvider({
         chain: this.toChain(this.active),
         rpcUrls: this.active.rpcUrls,
+        // Phase 11 — fold the chain's auth headers (set by the
+        // access-key composable at boot) onto the underlying
+        // transport. Optional; public RPCs leave it undefined.
+        ...(this.active.rpcHeaders
+          ? { rpcHeaders: this.active.rpcHeaders }
+          : {}),
       });
 
       this.rpcCache.set(chainId, rpc);

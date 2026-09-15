@@ -34,13 +34,43 @@ export class RpcProvider implements IRpcProvider {
 
   private readonly client: PublicClient;
 
-  constructor(opts: { chain: Chain; rpcUrls: readonly string[] }) {
+  constructor(opts: {
+    chain: Chain;
+    rpcUrls: readonly string[];
+    /**
+     * Optional HTTP headers attached to *every* request made
+     * through this provider. Phase 11 — used to authenticate
+     * paid providers (Alchemy `x-api-key`, Infura
+     * `Authorization: Bearer`, Tenderly, private nodes).
+     *
+     * Headers apply to **every** URL in `rpcUrls`. If a user
+     * wants per-endpoint auth (e.g. key A on Alchemy, key B on
+     * Infura in the fallback list), they should not mix
+     * authenticated and unauthenticated URLs in the same
+     * fallback list — viem sends the same `fetchOptions` to
+     * every transport.
+     *
+     * Defaults to `undefined` (no extra headers).
+     */
+    rpcHeaders?: Readonly<Record<string, string>>;
+  }) {
     this.chainId = opts.chain.id;
 
     // viem's `fallback` transport accepts an array of transports
     // and rotates through them on failure. With a single URL it
     // behaves identically to `http(url)`.
-    const transports = opts.rpcUrls.map((url) => http(url));
+    //
+    // Phase 11 — attach `fetchOptions.headers` so paid-provider
+    // auth (Alchemy / Infura / Tenderly / private) reaches the
+    // network. viem's `http()` forwards `fetchOptions` to its
+    // underlying `fetch` call (RequestInit-shaped).
+    const fetchOptions = opts.rpcHeaders
+      ? { headers: { ...opts.rpcHeaders } }
+      : undefined;
+
+    const transports = opts.rpcUrls.map(
+      (url) => http(url, fetchOptions ? { fetchOptions } : undefined),
+    );
 
     this.client = createPublicClient({
       chain: opts.chain,
