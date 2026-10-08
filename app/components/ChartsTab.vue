@@ -20,6 +20,11 @@ import type {
 } from '@core/application/dtos';
 import { tickToPrice } from '@core/math';
 import { useCoreServices } from '~/composables/useCoreServices';
+import {
+  HISTORY_WINDOW_DAYS,
+  type THistoryWindowDays,
+  useSessionState,
+} from '~/composables/useSessionState';
 
 interface IProps {
   pool: string;
@@ -32,10 +37,18 @@ interface IProps {
 const props = defineProps<IProps>();
 
 const { useCases } = useCoreServices();
+const session = useSessionState();
 
 const history = ref<IPoolHistoryDTO | null>(null);
 const isLoading = ref(false);
 const error = ref<string | null>(null);
+
+// Window selector state. Mirrored into session storage so the
+// user's preferred horizon survives reloads. Driven by
+// `HISTORY_WINDOW_DAYS` so the dropdown can never disagree with
+// what the use case knows how to render.
+const windowDays = ref<THistoryWindowDays>(session.historyWindowDays.value);
+const windowOptions = HISTORY_WINDOW_DAYS.map((d) => ({ label: `${d} days`, value: d }));
 
 // -----------------------------------------------------------------
 // Top-1 strategy
@@ -89,6 +102,7 @@ async function load() {
       pool: props.pool as `0x${string}`,
       chainId: props.chainId,
       protocolId: props.protocolId,
+      window: { kind: 'days', days: windowDays.value },
     });
     history.value = result;
   }
@@ -102,17 +116,56 @@ async function load() {
 
 onMounted(load);
 
-// Re-fetch when the user switches pools.
+// Re-fetch when the user switches pools OR changes the time-window
+// selector. The session-state write is a no-op when the value
+// hasn't actually changed.
 watch(() => [props.pool, props.chainId, props.protocolId], load);
+watch(windowDays, (days) => {
+  session.setHistoryWindowDays(days);
+  load();
+});
 
 const snapshots = computed<readonly IHistorySnapshotDTO[]>(() => history.value?.snapshots ?? []);
 const token0Symbol = computed(() => props.analysis?.token0.symbol ?? 'token0');
 const token1Symbol = computed(() => props.analysis?.token1.symbol ?? 'token1');
+
+/**
+ * Footer price-band formatter. We use Intl.NumberFormat with up
+ * to 6 fraction digits and no scientific notation so the
+ * user sees the actual price (e.g. "0.000342" instead of
+ * "3.42e-4"). Mirrors `formatTooltipPrice` in PriceChart.
+ */
+const footerFormatter = new Intl.NumberFormat(undefined, {
+  maximumFractionDigits: 6,
+  useGrouping: true,
+});
+function formatFooterPrice(v: number): string {
+  if (!Number.isFinite(v)) return '—';
+  if (v === 0) return '0';
+  if (Math.abs(v) >= 1) return footerFormatter.format(v);
+  // Sub-1 prices get 6 fraction digits, then we strip trailing
+  // zeros so "0.500000" → "0.5".
+  return v.toFixed(6).replace(/0+$/, '');
+}
 </script>
 
 <template>
   <div class="space-y-4 mt-4">
     <div class="flex flex-wrap items-center gap-3 text-sm text-muted">
+      <USelectMenu
+        :model-value="windowDays"
+        :items="windowOptions"
+        value-key="value"
+        size="xs"
+        :disabled="isLoading"
+        aria-label="Chart history window"
+        @update:model-value="(v: number) => windowDays = v as THistoryWindowDays"
+      >
+        <template #label>
+          <UIcon name="i-lucide-calendar" class="size-3.5" />
+          <span>{{ windowDays }} days</span>
+        </template>
+      </USelectMenu>
       <span>
         {{ snapshots.length }} snapshots
         <span v-if="history?.source === 'synthetic'" class="ml-2 text-amber-500">
@@ -189,7 +242,8 @@ const token1Symbol = computed(() => props.analysis?.token1.symbol ?? 'token1');
           <div>
             <span class="text-muted">price band: </span>
             <span class="font-mono">
-              [{{ topStrategy.lowerPrice.toFixed(6) }}, {{ topStrategy.upperPrice.toFixed(6) }}]
+              [{{ formatFooterPrice(topStrategy.lowerPrice) }}, {{ formatFooterPrice(topStrategy.upperPrice) }}]
+              <span class="text-muted">{{ token1Symbol }} / {{ token0Symbol }}</span>
             </span>
           </div>
           <div>

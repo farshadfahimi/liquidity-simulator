@@ -2179,6 +2179,129 @@ Suggested order (matches README):
 
 ## 8. Practical Do's and Don'ts
 
+### 8.0 No dev server
+
+**Do not run `pnpm dev`, `pnpm run dev`, `nuxt dev`, `vite`, or
+any equivalent command.** Agents must not start a Nuxt / Vite
+dev server — neither in the foreground nor in the background —
+under any circumstance. The user runs the browser; the agent's
+job is to make the code correct.
+
+Concretely, this forbids:
+
+- `pnpm dev`, `pnpm run dev`, `nuxt dev`, `vite`, `vite dev`,
+  `vite preview`, `node ./node_modules/.bin/nuxt dev`, or any
+  background `(pnpm dev > /tmp/log 2>&1 &)` invocation.
+- Spawning a long-running Nuxt / Vite process in the
+  background, including via `nohup`, `setsid`, `disown`, or
+  shell `&`.
+- Polling / probing a localhost port (e.g. `curl
+  http://localhost:3000/`) to "verify the dev server is up" —
+  this implies starting one.
+- Telling the user to "open `http://localhost:3000/`" or any
+  other URL a dev server would be serving. The user knows
+  where their own browser is.
+
+What agents should do instead:
+
+- Verify changes with `pnpm typecheck`, `pnpm exec nuxt
+  prepare`, and `pnpm test` (Vitest). **Do not run
+  `pnpm run build`** — see §8.1.
+- Rely on Vitest for chart / UI logic verification (see §6.18
+  for the chart-build unit tests and §11 for the no-browser
+  rule).
+- Tell the user the diff and wait for visual confirmation in
+  their own browser — the user opens the dev server
+  themselves, on their own terms.
+- If a port on `localhost` is already in use (left over from a
+  prior session the user started), **kill it** — that's fine —
+  but do not start a new one.
+
+Rationale: the user is the one looking at the chart; starting a
+dev server consumes CPU, occupies ports, leaves orphan processes
+between sessions, and most importantly substitutes the user's
+local browser for one the agent cannot see anyway. The pattern
+"agent starts dev server → curl 200 → assume it's fine" is
+explicitly banned because it produces false confidence (HTTP 200
+does not mean the chart renders correctly) and clutters the
+machine. Visual verification is always the user's responsibility.
+
+### 8.1 No build
+
+**Do not run `pnpm build`, `pnpm run build`, `nuxt build`,
+`nuxi build`, or any equivalent production-build command.**
+Agents must not run the Nuxt production build — neither in the
+foreground nor in the background — under any circumstance. The
+user runs the build; the agent's job is to make the code
+correct.
+
+Concretely, this forbids:
+
+- `pnpm build`, `pnpm run build`, `nuxt build`, `nuxi build`,
+  `node ./node_modules/.bin/nuxt build`, or any
+  background `(pnpm build > /tmp/log 2>&1 &)` invocation.
+- Spawning a long-running `nuxt build` / `nuxi build` /
+  `vite build` process in the background, including via
+  `nohup`, `setsid`, `disown`, or shell `&`.
+- Probing a build output directory (e.g.
+  `ls .output/server/index.mjs`, `du -sh .output/`,
+  `cat .nuxt/manifest.json`) to "verify the build succeeded" —
+  this implies running one.
+- Telling the user to "look at `.output/`" or any other path
+  the build would have written. The user knows where their own
+  build artifacts go.
+
+What agents should do instead:
+
+- Verify changes with `pnpm typecheck`, `pnpm exec nuxt
+  prepare`, and `pnpm test` (Vitest). The first two are fast
+  and side-effect-free (no `.output/` written, no `node_modules`
+  rebuild); the third runs the full test suite in pure Node.
+- Reference the Nuxt build only as an action the user takes.
+  If the user asks "does this build clean?" the answer is
+  *"I'm not running builds per §8.1 — please run
+  `pnpm run build` on your end and let me know"*.
+- **Exception**: run `pnpm build` (or `pnpm run build`)
+  **only when the user explicitly asks** for a build
+  verification — phrasings like "run the build", "make sure it
+  builds", "build and report errors", "verify the build",
+  "check the build", "test build", or similar. Quote the user's
+  instruction back in the response so the audit trail is
+  unambiguous. One-shot, no background spawn, no output
+  polling. The exception is per-invocation: each explicit
+  request is one build, not a standing waiver.
+
+What the exception is **not**:
+
+- "The typecheck is clean, so the build will be too" — that's
+  not a request to build, and `pnpm typecheck` does not catch
+  Nuxt / Vite-specific failures (rollup plugin errors, SSR
+  bundling issues, Nitro asset hashing, CSS extraction, etc.).
+- "Let's just double-check the build is OK" — that's a request
+  for `pnpm typecheck`, not `pnpm run build`. If unsure, ask.
+- "Tidy up" / "polish" / "make sure everything works" — none of
+  those are explicit build requests.
+
+Rationale: the user is the one shipping; running a full Nuxt
+production build is expensive (writes `.output/` with hundreds
+of MB of SSR + SPA bundles, runs Rollup + Vite across the whole
+app, takes 30-90s on a cold cache), produces noise the user
+must scroll past, and — like a dev server — substitutes the
+user's local toolchain for one the agent cannot see anyway.
+The pattern "agent runs build → grep for errors → assume it's
+fine" is banned because it (a) burns the user's CPU and disk
+unnecessarily, (b) produces false confidence (a passing build
+does not mean the chart renders correctly in the user's
+browser), and (c) leaves a stale `.output/` directory between
+sessions that can shadow a real build the user runs later.
+Build verification is always the user's responsibility, just
+like visual verification.
+
+> Note: `pnpm exec nuxt prepare` is **not** a build — it
+> regenerates the `.nuxt/types/` shims so `vue-tsc` can resolve
+> auto-imports and produces no `.output/` artifacts. Keep
+> running it as part of the standard verification loop.
+
 ### Do
 - Keep files small and single-purpose.
 - Add a barrel `index.ts` for every new folder.
@@ -2414,7 +2537,6 @@ Before declaring a task complete, verify:
 
 - [ ] Installed/updated dependencies with **pnpm** (e.g. `pnpm install`,
       `pnpm add <pkg>`). No `npm` or `yarn` commands anywhere.
-- [ ] `pnpm run build` (i.e. `nuxt build`) succeeds.
 - [ ] `pnpm exec nuxt prepare` succeeds.
 - [ ] `pnpm test` (Vitest) passes — all suites green.
 - [ ] `pnpm typecheck` is clean.
@@ -2438,6 +2560,11 @@ Before declaring a task complete, verify:
 - [ ] **Showed the user a diff (`git status` + `git diff --stat`) and
       received explicit approval before committing.** No commits
       without a green light. See §11.6.
+- [ ] **Did not run a dev server / Nuxt dev / Vite dev process.**
+      See §8.0.
+- [ ] **Did not run `pnpm run build` / `nuxt build`** unless the
+      user explicitly asked, in which case the user's instruction
+      is quoted in the response. See §8.1.
 
 ---
 

@@ -66,15 +66,34 @@ function safeRemove(key: string): void {
   }
 }
 
+/**
+ * Allowed values for the chart's history-window selector. We keep
+ * the set small + explicit (vs. accepting any number) so the
+ * `USelect` in `ChartsTab.vue` can't get out of sync with what the
+ * use case knows how to render.
+ */
+export const HISTORY_WINDOW_DAYS = [14, 30, 90] as const;
+export type THistoryWindowDays = typeof HISTORY_WINDOW_DAYS[number];
+const DEFAULT_HISTORY_WINDOW_DAYS: THistoryWindowDays = 14;
+
+function isHistoryWindowDays(n: unknown): n is THistoryWindowDays {
+  return typeof n === 'number'
+    && (HISTORY_WINDOW_DAYS as readonly number[]).includes(n);
+}
+
 export interface ISessionState {
   /** Last chain id the user picked, or `null` if never stored. */
   lastChainId: Ref<number | null>;
   /** Last protocol id (adapter) the user picked, or `null`. */
   lastProtocolId: Ref<string | null>;
+  /** Chart history window in days (default 14). */
+  historyWindowDays: Ref<THistoryWindowDays>;
   /** Persist a new chain id. */
   setChainId: (chainId: number) => void;
   /** Persist a new protocol id. */
   setProtocolId: (protocolId: string) => void;
+  /** Persist a new chart history window. */
+  setHistoryWindowDays: (days: THistoryWindowDays) => void;
   /** Wipe both keys (used when a stored value fails validation). */
   clear: () => void;
 }
@@ -88,6 +107,10 @@ export interface ISessionState {
 export function useSessionState(): ISessionState {
   const lastChainId = ref<number | null>(safeGet<number>('lastChainId'));
   const lastProtocolId = ref<string | null>(safeGet<string>('lastProtocolId'));
+  const storedDays = safeGet<number>('historyWindowDays');
+  const historyWindowDays = ref<THistoryWindowDays>(
+    isHistoryWindowDays(storedDays) ? storedDays : DEFAULT_HISTORY_WINDOW_DAYS,
+  );
 
   function setChainId(chainId: number) {
     lastChainId.value = chainId;
@@ -99,18 +122,27 @@ export function useSessionState(): ISessionState {
     safeSet('lastProtocolId', protocolId);
   }
 
+  function setHistoryWindowDays(days: THistoryWindowDays) {
+    historyWindowDays.value = days;
+    safeSet('historyWindowDays', days);
+  }
+
   function clear() {
     lastChainId.value = null;
     lastProtocolId.value = null;
+    historyWindowDays.value = DEFAULT_HISTORY_WINDOW_DAYS;
     safeRemove('lastChainId');
     safeRemove('lastProtocolId');
+    safeRemove('historyWindowDays');
   }
 
   return {
     lastChainId: readonly(lastChainId),
     lastProtocolId: readonly(lastProtocolId),
+    historyWindowDays: readonly(historyWindowDays),
     setChainId,
     setProtocolId,
+    setHistoryWindowDays,
     clear,
   };
 }

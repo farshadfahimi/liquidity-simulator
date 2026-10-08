@@ -11,3 +11,4 @@ export type {
 } from './position_simulation.dto';
 export type { IHistoricalReplayDTO } from './historical_replay.dto';
 export type { IRecommendationDTO, IRecommendationEntryDTO } from './recommendation.dto';
+export type { IHistorySnapshotDTO, IPoolHistoryDTO } from './pool_history.dto'

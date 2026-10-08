@@ -2,51 +2,65 @@
 
 // app/components/PriceChart.client.vue
 //
-// Chart.js wrapper for the "Charts" pool-page tab. Renders a
-// single line chart of pool price vs. timestamp with an
-// annotation box for the top-1 strategy's price range.
+// Charting wrapper for the "Charts" pool-page tab, powered by
+// TradingView's OPEN-SOURCE `lightweight-charts` library (the
+// same engine Uniswap/DexScreener/DexTools use). Renders a
+// STANDARD TIME-BASED AreaSeries chart of pool price vs. time,
+// with three horizontal PRICE LINES overlaying the top-1
+// strategy's lowerPrice / upperPrice and the current ("now")
+// price, plus explicit "swing high" / "swing low" markers on
+// the global extrema — so the user can read the exact range
+// values straight off the y-axis AND see where the visible
+// extremes are.
 //
 // `.client.vue` suffix is the Nuxt 4 convention for client-only
-// components — chart.js touches the DOM and would otherwise break
-// SSR. The ChartsTab already lives inside a `<ClientOnly>` block
-// (the whole pool page does), but keeping the `.client` suffix
-// belt-and-braces guarantees the import doesn't run server-side
-// even if a future refactor moves things around.
+// components — lightweight-charts creates canvas/DOM and would
+// otherwise break SSR. The ChartsTab already lives inside a
+// `<ClientOnly>` block, but keeping the suffix belt-and-braces
+// guarantees the import never runs server-side.
 //
-// The component is purely presentational: it accepts a series
-// and an optional strategy range, builds the chart.js dataset
-// + options imperatively, and tears down on unmount. No state
-// lives outside the ref.
+// This component delegates all chart construction to the pure,
+// test-covered builder in `app/utils/priceChart.ts`. The heavy
+// lifting there is mocked out in a Vitest unit test, so
+// regressions like the v4→v5 API change (`addAreaSeries` was
+// removed; v5 uses `chart.addSeries(SeriesDefinition, opts)`
+// and `createSeriesMarkers` replaced `series.setMarkers`) are
+// caught before they reach the browser.
+//
+// Chart primitive: AreaSeries (time-based, no candles).
+//
+// `IHistorySnapshotDTO` carries exactly ONE `price` per snapshot
+// (the close at the snapshot's block). The use case fetches
+// roughly one snapshot per day for the 14d/30d/90d UI selectors,
+// but the timestamps don't line up to UTC midnights. We still
+// GROUP the snapshots by UTC calendar day (see
+// `app/utils/groupSnapshotsByDay.ts`) so the x-axis lines up to
+// midnights and the swing markers stay anchored to the daily
+// scale, but we plot ONE point per day (the close). The swing
+// markers driven from each day's bucket `high` / `low` replace
+// the candlestick wicks that the old G4 layout would have shown.
 
-import { Line } from 'vue-chartjs';
 import {
-  Chart as ChartJS,
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  Title,
-  Tooltip,
-  Legend,
-  TimeScale,
-  Filler,
-} from 'chart.js';
-import annotationPlugin from 'chartjs-plugin-annotation';
-import type { ChartData, ChartOptions } from 'chart.js';
+  createChart,
+  LineStyle,
+  AreaSeries,
+  createSeriesMarkers,
+} from 'lightweight-charts';
+import type {
+  IChartApi,
+  ISeriesApi,
+  IPriceLine,
+  ISeriesMarkersPluginApi,
+  UTCTimestamp,
+  Time,
+} from 'lightweight-charts';
 import type { IHistorySnapshotDTO } from '@core/application/dtos';
-
-ChartJS.register(
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  Title,
-  Tooltip,
-  Legend,
-  TimeScale,
-  Filler,
-  annotationPlugin,
-);
+import {
+  applyDataAndOverlays,
+  buildPriceBadge,
+  buildPriceChart,
+  formatCrosshair,
+} from '~/utils/priceChart';
 
 interface IProps {
   snapshots: readonly IHistorySnapshotDTO[];
@@ -62,142 +76,231 @@ interface IProps {
   token1Symbol: string;
   /** Token0 symbol — used for the chart title. */
   token0Symbol: string;
-  /** Title of the chart (e.g. "ETH / USDC — 60-block history"). */
+  /** Title of the chart (e.g. "ETH / USDC — 14-day history"). */
   title: string;
   /** Marker color when the series is synthetic (vs on-chain). */
   synthetic?: boolean;
+  /** Window size for swing detection (default 3). Set to 0 to disable. */
+  swingWindow?: number;
 }
 
-const props = defineProps<IProps>();
+const props = withDefaults(defineProps<IProps>(), {
+  swingWindow: 4,
+});
 
-// Convert the bigint price series to numbers for chart.js
-// (it has no bigint support). The chart only needs visual
-// precision — tooltips format back to short strings.
-const data = computed<ChartData<'line'>>(() => {
-  const points = props.snapshots.map((s) => ({
-    x: Number(s.timestamp) * 1000, // ms for chart.js time scale
-    y: Number(s.price) / 10 ** s.priceDecimals,
-  }));
-  const yLabel = `${props.token0Symbol} (per ${props.token1Symbol})`;
-  return {
-    datasets: [
+// --- Refs for the imperative chart instance + the series we
+// --- create price lines against. These live entirely client-side.
+const containerRef = ref<HTMLElement | null>(null);
+const tooltipRef = ref<HTMLElement | null>(null);
+
+const chart = shallowRef<IChartApi | null>(null);
+const series = shallowRef<ISeriesApi<'Area'> | null>(null);
+const markersPlugin = shallowRef<ISeriesMarkersPluginApi<UTCTimestamp> | null>(null);
+// Price lines we've created on the series; we remove them before
+// re-applying so stale overlays don't stack when data/range change.
+const overlayLines = shallowRef<IPriceLine[]>([]);
+
+// Always-visible price badge in the top-left of the chart.
+// Built off the same inputs as the chart itself so the badge
+// value matches the y-axis data range.
+const badge = computed(() => buildPriceBadge({
+  snapshots: props.snapshots,
+  strategyRange: props.strategyRange ?? null,
+  token1Symbol: props.token1Symbol,
+  token0Symbol: props.token0Symbol,
+}));
+
+const lw = { createChart, LineStyle, AreaSeries, createSeriesMarkers };
+
+onMounted(() => {
+  if (!containerRef.value) return;
+
+  const handles = buildPriceChart(
+    {
+      snapshots: props.snapshots,
+      strategyRange: props.strategyRange ?? null,
+      token0Symbol: props.token0Symbol,
+      token1Symbol: props.token1Symbol,
+      synthetic: props.synthetic,
+      swingWindow: props.swingWindow,
+    },
+    lw,
+    containerRef.value,
+  );
+
+  chart.value = handles.chart;
+  series.value = handles.series;
+  markersPlugin.value = handles.markers;
+  overlayLines.value = handles.priceLines;
+
+  handles.chart.timeScale().fitContent();
+
+  // Crosshair -> simple HTML tooltip overlay.
+  handles.chart.subscribeCrosshairMove(handleCrosshair);
+});
+
+function handleCrosshair(param: {
+  time?: Time;
+  seriesData: Map<unknown, unknown>;
+  point?: { x: number; y: number } | null;
+}) {
+  const tooltipEl = tooltipRef.value;
+  const areaSeries = series.value;
+  if (!tooltipEl || !areaSeries) return;
+
+  // v5 AreaSeries: seriesData.get(series) returns a single-value
+  // `{ value }` payload when the crosshair hovers a point.
+  const data = param.seriesData.get(areaSeries) as { value?: number } | undefined;
+  const price = typeof data?.value === 'number' ? data.value : NaN;
+  if (!param.point || !Number.isFinite(price)) {
+    tooltipEl.style.display = 'none';
+    return;
+  }
+
+  const text = formatCrosshair({
+    time: param.time,
+    price,
+    token0Symbol: props.token0Symbol,
+    token1Symbol: props.token1Symbol,
+  });
+
+  tooltipEl.style.display = 'block';
+  tooltipEl.style.left = `${param.point.x + 12}px`;
+  tooltipEl.style.top = `${param.point.y - 8}px`;
+  tooltipEl.textContent = text;
+}
+
+// Re-apply data + overlays + markers whenever snapshots/range/window change.
+//
+// Why we accept the watched tuple as the callback argument:
+// The source getter `() => [props.snapshots, ...]` already does the
+// reactive read; Vue passes the resolved tuple to the callback so
+// we never need to touch `props.x` again. Reading `props.x` from
+// inside the watcher callback defeats Vue's getter-based change
+// detection AND forces the proxy to resolve on every reactive
+// fire, even for fields the watcher doesn't care about. The tuple
+// argument is also what `deep: true` triggers on correctly.
+watch(
+  () =>
+    [
+      props.snapshots,
+      props.strategyRange,
+      props.swingWindow,
+      props.synthetic,
+      props.token0Symbol,
+      props.token1Symbol,
+    ] as const,
+  ([nextSnapshots, nextRange, nextWindow, nextSynthetic, nextToken0, nextToken1]) => {
+    const areaSeries = series.value;
+    const plugin = markersPlugin.value;
+    if (!areaSeries || !plugin) return;
+
+    const newLines = applyDataAndOverlays(
+      areaSeries,
       {
-        label: yLabel,
-        data: points,
-        borderColor: props.synthetic ? 'rgb(148, 163, 184)' : 'rgb(99, 102, 241)',
-        backgroundColor: props.synthetic ? 'rgba(148, 163, 184, 0.15)' : 'rgba(99, 102, 241, 0.18)',
-        borderWidth: 2,
-        fill: true,
-        tension: 0.25,
-        pointRadius: points.length > 80 ? 0 : 3,
-        pointHoverRadius: 5,
+        snapshots: nextSnapshots,
+        strategyRange: nextRange ?? null,
+        token0Symbol: nextToken0,
+        token1Symbol: nextToken1,
+        synthetic: nextSynthetic,
+        swingWindow: nextWindow,
       },
-    ],
-  };
+      lw,
+      overlayLines.value,
+      plugin,
+    );
+    overlayLines.value = newLines;
+    chart.value?.timeScale().fitContent();
+  },
+  { deep: true },
+);
+
+onBeforeUnmount(() => {
+  const chartInstance = chart.value;
+  if (chartInstance) {
+    chartInstance.remove();
+    chart.value = null;
+    series.value = null;
+    markersPlugin.value = null;
+  }
 });
-
-const options = computed<ChartOptions<'line'>>(() => {
-  const showStrategyBox = !!props.strategyRange;
-
-  return {
-    responsive: true,
-    maintainAspectRatio: false,
-    interaction: { mode: 'index', intersect: false },
-    plugins: {
-      legend: { display: false },
-      title: {
-        display: true,
-        text: props.title,
-        color: 'rgb(148, 163, 184)',
-        font: { size: 13, weight: 'normal' },
-      },
-      tooltip: {
-        callbacks: {
-          label: (ctx) => {
-            const v = ctx.parsed.y;
-            return `price: ${formatPrice(v)}`;
-          },
-        },
-      },
-      annotation: showStrategyBox
-        ? {
-            annotations: {
-              strategyBox: {
-                type: 'box' as const,
-                yMin: props.strategyRange!.lowerPrice,
-                yMax: props.strategyRange!.upperPrice,
-                backgroundColor: 'rgba(34, 197, 94, 0.12)',
-                borderColor: 'rgba(34, 197, 94, 0.6)',
-                borderWidth: 1,
-                label: {
-                  display: true,
-                  content: `${props.strategyRange!.strategyName} (${props.strategyRange!.expectedApr.toFixed(1)}% APR)`,
-                  position: { x: 'center' as const, y: 'start' as const },
-                  color: 'rgb(34, 197, 94)',
-                  font: { size: 11, weight: 'bold' as const },
-                  backgroundColor: 'rgba(20, 83, 45, 0.7)',
-                },
-              },
-              currentPriceLine: {
-                type: 'line' as const,
-                yMin: props.snapshots.length
-                  ? Number(props.snapshots[props.snapshots.length - 1]!.price)
-                    / 10 ** props.snapshots[props.snapshots.length - 1]!.priceDecimals
-                  : 0,
-                yMax: props.snapshots.length
-                  ? Number(props.snapshots[props.snapshots.length - 1]!.price)
-                    / 10 ** props.snapshots[props.snapshots.length - 1]!.priceDecimals
-                  : 0,
-                borderColor: 'rgba(248, 113, 113, 0.8)',
-                borderWidth: 1.5,
-                borderDash: [4, 4],
-                label: {
-                  display: true,
-                  content: 'now',
-                  position: 'start',
-                  color: 'rgb(248, 113, 113)',
-                  backgroundColor: 'rgba(127, 29, 29, 0.7)',
-                },
-              },
-            },
-          }
-        : {},
-    },
-    scales: {
-      x: {
-        type: 'time' as const,
-        time: {
-          unit: 'minute' as const,
-          displayFormats: { minute: 'HH:mm' },
-        },
-        ticks: { color: 'rgb(148, 163, 184)' },
-        grid: { color: 'rgba(148, 163, 184, 0.1)' },
-      },
-      y: {
-        type: 'linear' as const,
-        ticks: {
-          color: 'rgb(148, 163, 184)',
-          callback: (v) => formatPrice(Number(v)),
-        },
-        grid: { color: 'rgba(148, 163, 184, 0.1)' },
-      },
-    },
-  };
-});
-
-/** Format a numeric price to a short human string for axis + tooltip. */
-function formatPrice(v: number): string {
-  if (!Number.isFinite(v)) return '—';
-  if (v === 0) return '0';
-  if (Math.abs(v) >= 1000) return v.toFixed(0);
-  if (Math.abs(v) >= 1) return v.toFixed(4);
-  if (Math.abs(v) >= 0.0001) return v.toFixed(6);
-  return v.toExponential(2);
-}
 </script>
 
 <template>
-  <div class="h-80 w-full">
-    <Line :data="data" :options="options" />
+  <!--
+    The chart container gets its own opaque dark surface so the
+    light-slate y-axis labels and grid lines stay legible regardless
+    of the host card/page background (e.g. Nuxt UI's default
+    `<UCard>` uses a light `bg-default`, which would otherwise make
+    the price-axis labels invisible). The canvas itself stays
+    transparent so the dark backdrop shows through.
+  -->
+  <div class="relative h-80 w-full rounded-md bg-slate-900 ring-1 ring-slate-700/60">
+    <!-- Explicit width/height on the lightweight-charts container
+         so the price-scale gutter is guaranteed to exist and the
+         right-axis labels render at their natural width. -->
+    <div ref="containerRef" class="h-full w-full" />
+    <!-- Persistent price badge (top-left). Shows the latest price,
+         the strategy range, and the swing high/low so the user
+         always sees the values even if the in-chart markers are
+         clipped by the gutter. -->
+    <div
+      class="pointer-events-none absolute left-2 top-2 z-10 max-w-[60%] rounded-md bg-slate-900/85 px-3 py-2 text-slate-100 shadow-lg ring-1 ring-slate-700/60"
+    >
+      <div class="flex items-baseline gap-2">
+        <span class="font-mono text-base font-semibold leading-none">
+          {{ badge.lastPrice }}
+        </span>
+        <span class="text-[10px] uppercase tracking-wide text-slate-400">
+          latest
+        </span>
+      </div>
+      <div v-if="badge.lastTime" class="mt-1 text-[10px] text-slate-400">
+        {{ badge.lastTime }}
+      </div>
+      <div
+        v-if="badge.rangeLabel"
+        class="mt-1 font-mono text-[11px] leading-none text-emerald-400"
+      >
+        {{ badge.rangeLabel }}
+      </div>
+      <div
+        v-if="badge.swingHighLabel || badge.swingLowLabel"
+        class="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[11px] leading-none"
+      >
+        <span v-if="badge.swingHighLabel" class="text-red-400">↓ {{ badge.swingHighLabel }}</span>
+        <span v-if="badge.swingLowLabel" class="text-emerald-400">↑ {{ badge.swingLowLabel }}</span>
+      </div>
+    </div>
+    <!--
+      Right-axis unit label ("Price (USDC / TKN0)").
+      lightweight-charts doesn't expose a native axis-title option
+      for price scales, so we render one as a positioned overlay.
+      Positioning notes:
+        - right-1 (8px) lands inside the 60px minimumWidth gutter
+          we set on the right price scale, beside the tick labels
+          instead of overlapping them.
+        - top-12 (48px) places it BELOW the lightweight-charts
+          "lastValueVisible" badge so the two never collide.
+        - vertical writing-mode + 180° rotation reads bottom-up,
+          matching how TradingView / most charting libs print the
+          y-axis unit (e.g. "USD" running upward along the right
+          gutter).
+        - tracking-widest + uppercase gives the small text room to
+          breathe so the unit feels like an axis label, not a tag.
+        - pointer-events-none so it never intercepts the crosshair.
+    -->
+    <div
+      class="pointer-events-none absolute right-1 top-12 z-10 select-none text-[10px] font-medium uppercase tracking-widest text-slate-400/85"
+      style="writing-mode: vertical-rl; transform: rotate(180deg);"
+      :aria-label="`Price axis unit: ${token1Symbol} per ${token0Symbol}`"
+    >
+      Price ({{ token1Symbol }}&nbsp;/&nbsp;{{ token0Symbol }})
+    </div>
+    <!-- Crosshair tooltip overlay -->
+    <div
+      ref="tooltipRef"
+      class="pointer-events-none fixed z-10 hidden rounded bg-slate-800/90 px-2 py-1 text-xs text-slate-200"
+    />
   </div>
 </template>
