@@ -71,8 +71,13 @@ export interface ILightweightChartsModule {
 
 export interface IPriceChartRange {
   strategyName: string;
-  lowerPrice: number;
-  upperPrice: number;
+  /**
+   * Lower / upper price in *human* units. `null` when the band's
+   * bounds round to 0 or exceed the displayable scale (e.g. a
+   * full V3 range). The chart treats `null` as "no line".
+   */
+  lowerPrice: number | null;
+  upperPrice: number | null;
   score: number;
   expectedApr: number;
 }
@@ -123,7 +128,8 @@ export function exactPriceToNumber(price: bigint, decimals: number): number {
 }
 
 /** Human-friendly price formatter (no scientific notation). */
-export function formatAxisPrice(v: number): string {
+export function formatAxisPrice(v: number | null): string {
+  if (v === null) return '—';
   if (!Number.isFinite(v)) return '—';
   if (v === 0) return '0';
   if (Math.abs(v) >= 1) return axisFormatter.format(v);

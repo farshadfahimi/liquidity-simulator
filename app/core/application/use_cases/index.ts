@@ -26,3 +26,9 @@ export {
 
 export type { IGetPoolHistoryInput } from './get_pool_history.use_case';
 export { GetPoolHistoryUseCase } from './get_pool_history.use_case';
+
+export type {
+  IAggregatableSnapshotInput,
+  IAggregateHistoryInput,
+} from './aggregate_history.use_case';
+export { AggregateHistoryUseCase } from './aggregate_history.use_case';

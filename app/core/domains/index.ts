@@ -8,3 +8,4 @@ export * from './analytics';
 export * from './recommendation';
 export * from './simulation';
 export * from './strategy';
+export * from './aggregation';

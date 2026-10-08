@@ -1,6 +1,7 @@
 // app/core/application/dtos/pool_history.dto.ts
 
 import type { TAddress } from '../../shared/types';
+import type { IHistoryCandleMap } from './candle.dto';
 
 /**
  * Output of {@link GetPoolHistoryUseCase}. A flat, chart-ready
@@ -12,6 +13,17 @@ import type { TAddress } from '../../shared/types';
  * `source` distinguishes real on-chain history from the synthetic
  * GBM fallback the use case falls back to when the underlying RPC
  * doesn't expose archive state for the requested block range.
+ *
+ * `candles` is **opt-in**: when the caller asks the use case to
+ * aggregate the snapshot stream into OHLC bars, the per-timeframe
+ * candle arrays are populated. When the caller doesn't, the field
+ * is `null` and the UI falls back to the raw `snapshots` series
+ * (sparse per-block points, fine for low-rate streams). The
+ * candle map is the natural shape for any candlestick chart
+ * (TradingView, lightweight-charts, Chart.js) and for
+ * stop-loss / take-profit detection in the simulation layer
+ * — both can consume the aggregated series without re-walking
+ * the raw snapshots.
  */
 export interface IPoolHistoryDTO {
   readonly pool: TAddress;
@@ -28,6 +40,13 @@ export interface IPoolHistoryDTO {
 
   /** Snapshots in ascending block order. */
   readonly snapshots: readonly IHistorySnapshotDTO[];
+
+  /**
+   * Pre-aggregated OHLC candles for the six standard timeframes
+   * (`'1m' | '5m' | '15m' | '1h' | '4h' | '1d'`). `null` when the
+   * caller didn't ask for candles — see {@link IGetPoolHistoryInput.withCandles}.
+   */
+  readonly candles: IHistoryCandleMap | null;
 
   /** Earliest snapshot's block number (or 0 for synthetic). */
   readonly fromBlock: bigint;

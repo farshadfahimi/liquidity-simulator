@@ -12,11 +12,22 @@ import type { IRecommendationStrategy } from '../strategy';
 /**
  * Highest-capital-efficiency recommendation strategy.
  *
- * Strategy: just rank by CE. The score is
+ * Strategy: rank by inverse-CE so the **tightest** range wins. The
+ * `capitalEfficiencyRatio` helper returns `P_upper / P_lower` (a
+ * "V2-equivalent multiplier" — wider ranges get a higher number,
+ * up to `1.0001^MAX_WIDTH`). To match the user-facing promise of
+ * "highest capital efficiency" (i.e. tightest range that still has
+ * meaningful capital efficiency), we invert the factor:
  *
- *     score = min(ce, MAX_CE) / MAX_CE
+ *     ceFactor    = min(ce, MAX_CE) / MAX_CE       ∈ [0, 1]
+ *     score       = (SCORE_SCALE − ceFactor) ...   high for tight
+ *                   … so wide ranges saturate at 0 and tight
+ *                   ranges saturate at SCORE_SCALE.
  *
- * saturating at `MAX_CE` (default 5× V2-equivalent).
+ * Note: ranges whose CE exceeds `MAX_CE` (default 5× V2-equivalent)
+ * are treated as "too wide to be a real concentrated position"
+ * and get a score of 0. This excludes the full V2-like spans
+ * (e.g. a 1M-tick range that produces absurd price bounds).
  *
  * This is intentionally trivial — a "pure CE" ranker is useful as
  * a sanity check and as the "I want the tightest range, period"
@@ -40,10 +51,12 @@ export class HighestCapitalEfficiencyStrategy implements IRecommendationStrategy
       return 0n;
     }
 
-    if (ce >= HighestCapitalEfficiencyStrategy.MAX_CE) {
-      return SCORE_SCALE;
-    }
+    // ceFactor: 0 for tight range (CE=1), 1 for wide range (CE >= MAX_CE).
+    const ceFactor = ce >= HighestCapitalEfficiencyStrategy.MAX_CE
+      ? SCORE_SCALE
+      : (ce * SCORE_SCALE) / HighestCapitalEfficiencyStrategy.MAX_CE;
 
-    return (ce * SCORE_SCALE) / HighestCapitalEfficiencyStrategy.MAX_CE;
+    // Invert: tight range → high score, wide range → 0.
+    return SCORE_SCALE - ceFactor;
   }
 }

@@ -58,6 +58,20 @@ const windowOptions = HISTORY_WINDOW_DAYS.map((d) => ({ label: `${d} days`, valu
 // descending (per the DTO doc), so the first element is the
 // top-1. We convert its tickLower / tickUpper to a price band
 // using `tickToPrice` so the chart can overlay a box annotation.
+//
+// Defensive: extreme ranges (e.g. a 1M-tick "full V2" span) can
+// produce values that round to 0 at the lower bound and overflow
+// the 1e18 scale at the upper bound. We expose those as `null`
+// so the chart skips the line and the footer shows "—" instead
+// of "0" and "2,019,718,696,938,839,600".
+const PRICE_DISPLAY_CAP = 1e15; // anything above this is "essentially unbounded"
+function toHumanPrice(price: { value: bigint; decimals: number }): number | null {
+  const v = Number(price.value) / 10 ** price.decimals;
+  if (!Number.isFinite(v) || v <= 0) return null;
+  if (v > PRICE_DISPLAY_CAP) return null;
+  return v;
+}
+
 const topStrategy = computed(() => {
   const top = props.recommendation?.recommendations?.[0] ?? null;
   if (!top || !props.analysis) return null;
@@ -65,12 +79,15 @@ const topStrategy = computed(() => {
   const t1d = props.analysis.token1.decimals;
   const lower = tickToPrice(top.tickLower, t0d, t1d, 18);
   const upper = tickToPrice(top.tickUpper, t0d, t1d, 18);
+  const lowerPrice = toHumanPrice(lower);
+  const upperPrice = toHumanPrice(upper);
   return {
     strategyName: top.strategyName,
     tickLower: top.tickLower,
     tickUpper: top.tickUpper,
-    lowerPrice: Number(lower.value) / 1e18,
-    upperPrice: Number(upper.value) / 1e18,
+    lowerPrice,
+    upperPrice,
+    hasFiniteBand: lowerPrice !== null && upperPrice !== null,
     score: Number(top.score) / 1e18,
     expectedApr: Number(top.expectedApr) / 1e18 * 100,
   };
@@ -139,7 +156,8 @@ const footerFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 6,
   useGrouping: true,
 });
-function formatFooterPrice(v: number): string {
+function formatFooterPrice(v: number | null): string {
+  if (v === null) return '—';
   if (!Number.isFinite(v)) return '—';
   if (v === 0) return '0';
   if (Math.abs(v) >= 1) return footerFormatter.format(v);
@@ -241,9 +259,12 @@ function formatFooterPrice(v: number): string {
           </div>
           <div>
             <span class="text-muted">price band: </span>
-            <span class="font-mono">
+            <span v-if="topStrategy.hasFiniteBand" class="font-mono">
               [{{ formatFooterPrice(topStrategy.lowerPrice) }}, {{ formatFooterPrice(topStrategy.upperPrice) }}]
               <span class="text-muted">{{ token1Symbol }} / {{ token0Symbol }}</span>
+            </span>
+            <span v-else class="text-muted italic">
+              full V3 range — outside displayable price scale
             </span>
           </div>
           <div>

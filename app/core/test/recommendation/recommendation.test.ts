@@ -337,4 +337,57 @@ describe('Phase 6 — Recommendation Engine', () => {
       .recommendations.map((r) => r.id);
     expect(ids1).toEqual(ids2);
   });
+
+  it('highest-capital-efficiency picks the TIGHTEST range and rejects full-range spans', async () => {
+    // The strategy is documented as "I want the tightest range, period".
+    // The math must agree: the top pick has the smallest width in ticks,
+    // and ranges wider than MAX_CE (5× V2-equivalent) are dropped to
+    // score 0. The 1M-tick "full V2" span must NOT win.
+    const fixture = (await loadLivePool()) ?? syntheticFixture();
+    const pool = createPool({ state: fixture.state, chainId: mainnet.id });
+    const constantGen = createConstantRangeGenerator({
+      widthsTicks: [100, 500, 2000, 10000, 50000],
+    });
+    const candidates = constantGen.generate(pool);
+    expect(candidates.length).toBeGreaterThan(1);
+
+    // Sanity: the widest candidate has CE >> MAX_CE (5× V2-equivalent).
+    const widestWidth = Math.max(
+      ...candidates.map((c) => c.tickUpper - c.tickLower),
+    );
+    expect(widestWidth).toBeGreaterThan(1_000_000);
+
+    const strategy = createHighestCapitalEfficiencyStrategy();
+    const scoringConfig = createScoringConfig({
+      riskFreeApr: 0n,
+      targetApr: 3n * 10n ** 17n,
+      realizedVolatilityAnnual: 5n * 10n ** 17n,
+    });
+    const engine = createRecommendationEngine();
+    const set = engine.recommend({
+      pool,
+      generator: constantGen,
+      strategies: [strategy],
+      scoringConfig,
+    });
+
+    // Strategy emits a recommendation per non-zero-scoring candidate.
+    // The full V2-like span must be dropped to score 0 (and therefore
+    // filtered out by minScoreToKeep).
+    const hce = set.byStrategy('highest-capital-efficiency');
+    expect(hce.length).toBeGreaterThan(0);
+    expect(hce.length).toBeLessThan(candidates.length);
+
+    // Top pick must be the tightest (smallest width) range.
+    const top = hce[0]!;
+    const topWidth = top.range.tickUpper - top.range.tickLower;
+    const minWidth = Math.min(...candidates.map((c) => c.tickUpper - c.tickLower));
+    expect(topWidth).toBe(minWidth);
+
+    // The top pick's tick band must be a small fraction of the
+    // full V3 envelope (±887272). For USDC/WETH with tickSpacing=10
+    // and the smallest width=100*10=1000, the half-width is 5000
+    // ticks — well under the 1.7M-tick V3 envelope.
+    expect(topWidth).toBeLessThan(20_000);
+  });
 });

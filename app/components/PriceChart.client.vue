@@ -64,11 +64,17 @@ import {
 
 interface IProps {
   snapshots: readonly IHistorySnapshotDTO[];
-  /** Top-1 strategy range to overlay (price band). */
+  /**
+   * Top-1 strategy range to overlay (price band). `lowerPrice` /
+   * `upperPrice` are `null` when the band is wider than the
+   * displayable price scale (e.g. a full V3 span) — the chart
+   * then skips drawing the line instead of overlaying an
+   * off-screen price.
+   */
   strategyRange?: {
     strategyName: string;
-    lowerPrice: number;
-    upperPrice: number;
+    lowerPrice: number | null;
+    upperPrice: number | null;
     score: number;
     expectedApr: number;
   } | null;

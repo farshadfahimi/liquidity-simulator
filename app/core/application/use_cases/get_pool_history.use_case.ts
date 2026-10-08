@@ -8,12 +8,18 @@ import type { TAddress } from '../../shared/types';
 import type { IRpcProvider } from '../../providers/rpc';
 import type { IProtocolAdapter } from '../../adapters/protocol_adapter.interface';
 import { bigintExp } from '../../math';
+import {
+  ALL_TIMEFRAMES,
+  HistoryAggregator,
+} from '../../domains/aggregation';
+import type { TCandleTimeframe } from '../../domains/aggregation';
 import { InvalidUseCaseInputError } from '../errors/invalid_input_error';
 import type { TAdapterResolver } from './adapter_resolver.type';
 import type {
   IPoolHistoryDTO,
   IHistorySnapshotDTO,
 } from '../dtos/pool_history.dto';
+import type { IHistoryCandleDTO, IHistoryCandleMap } from '../dtos/candle.dto';
 
 /**
  * Knobs for {@link GetPoolHistoryUseCase}. All values have sensible
@@ -81,6 +87,34 @@ export interface IGetPoolHistoryInput {
 
   /** Output precision for `price` in the returned DTO. Default 18. */
   readonly priceDecimals?: number;
+
+  /**
+   * Whether the use case should pre-aggregate the snapshot
+   * stream into OHLC candles for the six standard timeframes
+   * (`'1m' | '5m' | '15m' | '1h' | '4h' | '1d'`).
+   *
+   * - `false` (default) — `IPoolHistoryDTO.candles` is `null` and
+   *   the UI falls back to the raw per-block `snapshots` series.
+   * - `true` — the use case aggregates the *full* snapshot stream
+   *   into all six timeframes. This is the natural shape for any
+   *   candlestick chart (TradingView, lightweight-charts,
+   *   Chart.js) and for stop-loss / take-profit detection in the
+   *   simulation layer.
+   * - An explicit `TCandleTimeframe[]` — only the listed
+   *   timeframes are populated. The other entries are empty
+   *   arrays. Use this when the chart only needs one resolution.
+   *
+   * Aggregation is pure and runs in microseconds for typical
+   * stream sizes (≤ 200 snapshots). The candles are derived
+   * from the same sorted stream as `snapshots`, so the
+   * open/close/high/low values line up bit-for-bit with the raw
+   * points in the same bucket.
+   *
+   * The synthetic fallback also produces candles when this
+   * flag is set — the UI gets a consistent shape regardless of
+   * whether the underlying RPC exposes archive state.
+   */
+  readonly withCandles?: boolean | readonly TCandleTimeframe[];
 }
 
 /**
@@ -282,6 +316,7 @@ export class GetPoolHistoryUseCase {
           input.annualizedVolatilityOverride,
           targetWindowSeconds,
           'on-chain fetch returned fewer than 2 snapshots',
+          input.withCandles,
         );
       }
 
@@ -315,6 +350,7 @@ export class GetPoolHistoryUseCase {
           input.annualizedVolatilityOverride,
           targetWindowSeconds,
           flatness.reason,
+          input.withCandles,
         );
       }
 
@@ -332,6 +368,7 @@ export class GetPoolHistoryUseCase {
         source: 'on-chain',
         sourceDetail: `walked ${snapshots.length} blocks at step ${blockStep}`,
         snapshots,
+        candles: this.buildCandles(snapshots, input.withCandles),
         fromBlock: first.blockNumber,
         toBlock: last.blockNumber,
         historyWindowSeconds: last.timestamp - first.timestamp,
@@ -356,6 +393,7 @@ export class GetPoolHistoryUseCase {
         input.annualizedVolatilityOverride,
         targetWindowSeconds,
         err instanceof Error ? err.message : String(err),
+        input.withCandles,
       );
     }
   }
@@ -515,6 +553,7 @@ export class GetPoolHistoryUseCase {
     annualizedVolatilityOverride: bigint | undefined,
     targetWindowSeconds: bigint,
     reason: string,
+    withCandles?: boolean | readonly TCandleTimeframe[],
   ): IPoolHistoryDTO {
     // Derive the point count from the *window* (not from a fixed
     // SYNTHETIC_NUM_SNAPSHOTS), so a 14-day chart and a 90-day
@@ -600,6 +639,7 @@ export class GetPoolHistoryUseCase {
       source: 'synthetic',
       sourceDetail: `synthetic GBM fallback: ${reason || 'archive node unavailable'}`,
       snapshots,
+      candles: this.buildCandles(snapshots, withCandles),
       fromBlock: 0n,
       toBlock: 0n,
       historyWindowSeconds: totalSeconds,
@@ -610,6 +650,111 @@ export class GetPoolHistoryUseCase {
   // -----------------------------------------------------------------
   // Internal — helpers
   // -----------------------------------------------------------------
+
+  /**
+   * Aggregate a snapshot stream into OHLC candles for the
+   * requested timeframes. Returns `null` when the caller didn't
+   * ask for candles (`withCandles` falsy) so the field on the
+   * DTO can use the `null | IHistoryCandleMap` shape without
+   * allocating an empty `Record`.
+   *
+   * Selective mode (`withCandles: TCandleTimeframe[]`) returns a
+   * full {@link IHistoryCandleMap} with the unrequested
+   * timeframes set to `[]`. This is the shape the UI wants when
+   * it iterates the map to render a timeframe selector — every
+   * key is always present so the dropdown can be `v-for` over
+   * the map without conditionals.
+   *
+   * `false` and `undefined` both disable aggregation; we
+   * accept either to keep the call sites free of `?? false`
+   * noise.
+   *
+   * The aggregator is instantiated per-call rather than held on
+   * the instance so the helper is trivially testable in
+   * isolation and we don't share mutable state across
+   * concurrent `execute()` calls (the class is pure today, but
+   * keeping the instance isolated is cheap insurance against
+   * future caching).
+   */
+  private buildCandles(
+    snapshots: readonly IHistorySnapshotDTO[],
+    withCandles: boolean | readonly TCandleTimeframe[] | undefined,
+  ): IHistoryCandleMap | null {
+    if (!withCandles) return null;
+    if (snapshots.length === 0) {
+      // Caller asked for candles but the underlying stream is
+      // empty. Return a fully-populated, all-empty map so the
+      // UI's "for each timeframe" iteration doesn't have to
+      // special-case the null path. This matches the selective
+      // mode contract: every key present, all empty.
+      return this.emptyCandleMap(withCandles);
+    }
+
+    const aggregator = new HistoryAggregator();
+    const aggInput = snapshots.map((s) => ({
+      timestamp: s.timestamp,
+      price: s.price,
+      priceDecimals: s.priceDecimals,
+    }));
+
+    const selected = withCandles === true
+      ? ALL_TIMEFRAMES
+      : (withCandles as readonly TCandleTimeframe[]);
+
+    const out = {} as Record<TCandleTimeframe, readonly IHistoryCandleDTO[]>;
+    for (const tf of selected) {
+      // Translate the domain value object into the wire DTO.
+      // The shapes are intentionally near-identical; the
+      // difference is `timeframe` (which lives on the candle
+      // class, not the DTO's enclosing record) and the
+      // trailing OHLC fields. We map field-for-field rather
+      // than returning the domain class directly because the
+      // application layer never leaks domain types past its
+      // boundary — the chart, the SL/TP detector, and any
+      // downstream consumer must work with the plain DTO.
+      const candles = aggregator.aggregate(aggInput, tf);
+      out[tf] = candles.map((c) => ({
+        timeframe: c.timeframe,
+        openTimestamp: c.openTimestamp,
+        closeTimestamp: c.closeTimestamp,
+        openPrice: c.openPrice,
+        highPrice: c.highPrice,
+        lowPrice: c.lowPrice,
+        closePrice: c.closePrice,
+        averagePrice: c.averagePrice,
+        priceDecimals: c.priceDecimals,
+        sampleCount: c.sampleCount,
+      }));
+    }
+
+    // Ensure unselected timeframes are present as empty arrays
+    // so the IHistoryCandleMap shape is stable.
+    for (const tf of ALL_TIMEFRAMES) {
+      if (!(tf in out)) out[tf] = [];
+    }
+
+    return out as IHistoryCandleMap;
+  }
+
+  /**
+   * Build an all-timeframes, all-empty candle map. Used when
+   * the caller asked for candles but the underlying stream is
+   * empty — preserves the map's shape so the UI's iteration
+   * doesn't need a null check.
+   */
+  private emptyCandleMap(
+    withCandles: boolean | readonly TCandleTimeframe[],
+  ): IHistoryCandleMap {
+    const selected = withCandles === true
+      ? ALL_TIMEFRAMES
+      : (withCandles as readonly TCandleTimeframe[]);
+    const out = {} as Record<TCandleTimeframe, readonly IHistoryCandleDTO[]>;
+    for (const tf of selected) out[tf] = [];
+    for (const tf of ALL_TIMEFRAMES) {
+      if (!(tf in out)) out[tf] = [];
+    }
+    return out as IHistoryCandleMap;
+  }
 
   private buildDomainHistory(
     snapshots: readonly IHistorySnapshotDTO[],

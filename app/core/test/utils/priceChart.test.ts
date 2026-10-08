@@ -316,14 +316,16 @@ describe('priceChart utility', () => {
       expect(titles).toContain('now');
     });
 
-    it('hides the lower line when lowerPrice is 0, keeps upper when finite>0 (degenerate-range guard)', () => {
+    it('hides the lower line when lowerPrice is null (out-of-scale), keeps upper when finite>0 (degenerate-range guard)', () => {
       const { module, spy } = createMockLw();
       buildPriceChart({
         snapshots: [snapshot('350000', 1_000)],
         strategyRange: {
           strategyName: 'Test',
-          lowerPrice: 0,
-          upperPrice: 1.5e18,
+          // null = the band collapsed to 0 (full V3 lower bound) —
+          // ChartsTab emits null so the chart skips the line.
+          lowerPrice: null,
+          upperPrice: 1.5,
           score: 1,
           expectedApr: 99,
         },
