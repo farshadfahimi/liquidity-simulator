@@ -16,7 +16,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import type {
   IPoolHistoryDTO,
   IRecommendationDTO,
-  IHistorySnapshotDTO,
+  IHistoryCandleDTO,
 } from '@core/application/dtos';
 import { tickToPrice } from '@core/math';
 import { useCoreServices } from '~/composables/useCoreServices';
@@ -120,6 +120,7 @@ async function load() {
       chainId: props.chainId,
       protocolId: props.protocolId,
       window: { kind: 'days', days: windowDays.value },
+      withCandles: ['1d'],
     });
     history.value = result;
   }
@@ -142,7 +143,13 @@ watch(windowDays, (days) => {
   load();
 });
 
-const snapshots = computed<readonly IHistorySnapshotDTO[]>(() => history.value?.snapshots ?? []);
+const snapshots = computed(() => history.value?.snapshots ?? []);
+// Daily OHLC candles produced by the `HistoryAggregator` (the use
+// case pre-aggregates the snapshot stream when `withCandles` is
+// set). The chart plots these directly — no client-side re-bucketing.
+const candles = computed<readonly IHistoryCandleDTO[]>(
+  () => history.value?.candles?.['1d'] ?? [],
+);
 const token0Symbol = computed(() => props.analysis?.token0.symbol ?? 'token0');
 const token1Symbol = computed(() => props.analysis?.token1.symbol ?? 'token1');
 
@@ -227,13 +234,13 @@ function formatFooterPrice(v: number | null): string {
         Waiting for pool analysis…
       </div>
 
-      <div v-else-if="snapshots.length < 2" class="text-muted text-sm">
-        Not enough snapshots to draw a chart.
+      <div v-else-if="candles.length < 2" class="text-muted text-sm">
+        Not enough candles to draw a chart.
       </div>
 
       <ClientOnly v-else>
         <PriceChart
-          :snapshots="snapshots"
+          :candles="candles"
           :strategy-range="topStrategy"
           :token0-symbol="token0Symbol"
           :token1-symbol="token1Symbol"

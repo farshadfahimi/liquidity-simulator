@@ -29,16 +29,13 @@
 //
 // Chart primitive: AreaSeries (time-based, no candles).
 //
-// `IHistorySnapshotDTO` carries exactly ONE `price` per snapshot
-// (the close at the snapshot's block). The use case fetches
-// roughly one snapshot per day for the 14d/30d/90d UI selectors,
-// but the timestamps don't line up to UTC midnights. We still
-// GROUP the snapshots by UTC calendar day (see
-// `app/utils/groupSnapshotsByDay.ts`) so the x-axis lines up to
-// midnights and the swing markers stay anchored to the daily
-// scale, but we plot ONE point per day (the close). The swing
-// markers driven from each day's bucket `high` / `low` replace
-// the candlestick wicks that the old G4 layout would have shown.
+// The use case fetches roughly one snapshot per day for the
+// 14d/30d/90d UI selectors. Those snapshots are aggregated into
+// daily OHLC candles by the `HistoryAggregator` (timeframe `'1d'`)
+// before reaching this component — so the x-axis lines up to UTC
+// midnight and the swing markers are driven from each day's
+// `high` / `low` (not from a client-side re-bucketing of raw
+// snapshots).
 
 import {
   createChart,
@@ -54,7 +51,7 @@ import type {
   UTCTimestamp,
   Time,
 } from 'lightweight-charts';
-import type { IHistorySnapshotDTO } from '@core/application/dtos';
+import type { IHistoryCandleDTO } from '@core/application/dtos';
 import {
   applyDataAndOverlays,
   buildPriceBadge,
@@ -63,7 +60,8 @@ import {
 } from '~/utils/priceChart';
 
 interface IProps {
-  snapshots: readonly IHistorySnapshotDTO[];
+  /** Daily OHLC candles (from `HistoryAggregator`, timeframe `'1d'`). */
+  candles: readonly IHistoryCandleDTO[];
   /**
    * Top-1 strategy range to overlay (price band). `lowerPrice` /
    * `upperPrice` are `null` when the band is wider than the
@@ -110,7 +108,7 @@ const overlayLines = shallowRef<IPriceLine[]>([]);
 // Built off the same inputs as the chart itself so the badge
 // value matches the y-axis data range.
 const badge = computed(() => buildPriceBadge({
-  snapshots: props.snapshots,
+  candles: props.candles,
   strategyRange: props.strategyRange ?? null,
   token1Symbol: props.token1Symbol,
   token0Symbol: props.token0Symbol,
@@ -123,7 +121,7 @@ onMounted(() => {
 
   const handles = buildPriceChart(
     {
-      snapshots: props.snapshots,
+      candles: props.candles,
       strategyRange: props.strategyRange ?? null,
       token0Symbol: props.token0Symbol,
       token1Symbol: props.token1Symbol,
@@ -176,10 +174,10 @@ function handleCrosshair(param: {
   tooltipEl.textContent = text;
 }
 
-// Re-apply data + overlays + markers whenever snapshots/range/window change.
+// Re-apply data + overlays + markers whenever candles/range/window change.
 //
 // Why we accept the watched tuple as the callback argument:
-// The source getter `() => [props.snapshots, ...]` already does the
+// The source getter `() => [props.candles, ...]` already does the
 // reactive read; Vue passes the resolved tuple to the callback so
 // we never need to touch `props.x` again. Reading `props.x` from
 // inside the watcher callback defeats Vue's getter-based change
@@ -189,14 +187,14 @@ function handleCrosshair(param: {
 watch(
   () =>
     [
-      props.snapshots,
+      props.candles,
       props.strategyRange,
       props.swingWindow,
       props.synthetic,
       props.token0Symbol,
       props.token1Symbol,
     ] as const,
-  ([nextSnapshots, nextRange, nextWindow, nextSynthetic, nextToken0, nextToken1]) => {
+  ([nextCandles, nextRange, nextWindow, nextSynthetic, nextToken0, nextToken1]) => {
     const areaSeries = series.value;
     const plugin = markersPlugin.value;
     if (!areaSeries || !plugin) return;
@@ -204,7 +202,7 @@ watch(
     const newLines = applyDataAndOverlays(
       areaSeries,
       {
-        snapshots: nextSnapshots,
+        candles: nextCandles,
         strategyRange: nextRange ?? null,
         token0Symbol: nextToken0,
         token1Symbol: nextToken1,

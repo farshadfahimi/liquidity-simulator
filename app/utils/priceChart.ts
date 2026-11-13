@@ -22,17 +22,16 @@
 // Chart primitive: `AreaSeries` — a STANDARD time-based chart
 // (no candles).
 //
-// `IHistorySnapshotDTO` carries exactly ONE `price` per snapshot
-// (the close at the snapshot's block) — see
-// `get_pool_history.use_case.ts:fetchOnChainSnapshots` and
-// `syntheticFallback`. We still GROUP the snapshots by UTC
-// calendar day (see `groupSnapshotsByDay`) so the x-axis lines
-// up to midnights and the swing markers stay anchored to the
-// daily scale, but we plot ONE point per day (the close), not
-// four. Within-day price extremes are surfaced by the swing-high
-// / swing-low markers driven from each day's bucket `high` /
-// `low` rather than from a candle wick — which is what the user
-// explicitly asked for ("show swing high and swing low").
+// The chart consumes **daily OHLC candles** produced by the
+// `HistoryAggregator` (timeframe `'1d'`) — see
+// `get_pool_history.use_case.ts:buildCandles` and
+// `aggregate_history.use_case.ts`. The `ChartsTab` requests
+// `withCandles: ['1d']` and passes `history.candles['1d']` to
+// this component. Each candle already carries open/high/low/close,
+// so the x-axis lines up to UTC midnight and the swing markers are
+// driven from each day's `high` / `low` rather than from a
+// client-side re-bucketing of raw snapshots — which is what the
+// user explicitly asked for ("show swing high and swing low").
 
 import type {
   IChartApi,
@@ -44,8 +43,8 @@ import type {
   AreaData,
   SeriesMarker,
 } from 'lightweight-charts';
-import type { IHistorySnapshotDTO } from '@core/application/dtos';
-import { groupSnapshotsByDay, type IOhlcCandle } from './groupSnapshotsByDay';
+import type { IHistoryCandleDTO } from '@core/application/dtos';
+import type { IOhlcCandle } from './groupSnapshotsByDay';
 
 /**
  * Minimal structural surface of the chart library the builder
@@ -83,7 +82,8 @@ export interface IPriceChartRange {
 }
 
 export interface IPriceChartInput {
-  snapshots: readonly IHistorySnapshotDTO[];
+  /** Daily OHLC candles (from `HistoryAggregator`, timeframe `'1d'`). */
+  candles: readonly IHistoryCandleDTO[];
   strategyRange?: IPriceChartRange | null;
   token0Symbol: string;
   token1Symbol: string;
@@ -137,37 +137,51 @@ export function formatAxisPrice(v: number | null): string {
 }
 
 /**
- * Group raw snapshots into UTC-day buckets (one IOhlcCandle per
- * day) — thin re-export of `groupSnapshotsByDay` so callers that
- * import from `priceChart` don't need to know about the helper
- * module. Used internally by `toLinePoints`, `findSwingPoints`,
- * `applyDataAndOverlays`, and `buildPriceBadge`.
+ * Translate daily `HistoryAggregator` candles (`IHistoryCandleDTO`,
+ * timeframe `'1d'`) into the plain `IOhlcCandle` shape the chart
+ * code works with — `time` (unix seconds, aligned to midnight via
+ * the aggregator's `floor(t / period)` bucketing) plus numeric
+ * open/high/low/close/decimals.
+ *
+ * This is a pure mapping: the candles are already bucketed by the
+ * aggregator, so no re-bucketing happens here. The `exactPriceToNumber`
+ * conversion keeps the four OHLC fields at full precision.
+ *
+ * Returned candles are in the aggregator's ascending
+ * `openTimestamp` order.
  */
-export function snapshotsToCandles(
-  snapshots: readonly IHistorySnapshotDTO[],
+export function candlesToOhlc(
+  candles: readonly IHistoryCandleDTO[],
 ): IOhlcCandle[] {
-  return groupSnapshotsByDay(snapshots);
+  return candles.map((c) => ({
+    time: Number(c.openTimestamp),
+    open: exactPriceToNumber(c.openPrice, c.priceDecimals),
+    high: exactPriceToNumber(c.highPrice, c.priceDecimals),
+    low: exactPriceToNumber(c.lowPrice, c.priceDecimals),
+    close: exactPriceToNumber(c.closePrice, c.priceDecimals),
+    decimals: c.priceDecimals,
+  }));
 }
 
 /**
- * Convert snapshot DTOs into area-series points — one point per
- * UTC day, plotting each day's CLOSE. The bucket semantics are
- * inherited from `groupSnapshotsByDay` so the x-axis lines up to
- * midnight UTC and the swing markers (driven from `high`/`low`)
- * stay aligned with the visible bars.
+ * Convert daily candles into area-series points — one point per
+ * candle, plotting each candle's CLOSE. The x-axis lines up to
+ * the candle's `openTimestamp` (midnight UTC for a `'1d'` bucket)
+ * so the swing markers (driven from `high`/`low`) stay aligned
+ * with the visible bars.
  *
  * Returned points are in chronological (ascending-time) order,
  * which is what `series.setData` requires — `lightweight-charts`
  * throws if the array isn't sorted ascending by `time`.
  */
 export function toLinePoints(
-  snapshots: readonly IHistorySnapshotDTO[],
+  candles: readonly IHistoryCandleDTO[],
 ): AreaData<UTCTimestamp>[] {
   const out: AreaData<UTCTimestamp>[] = [];
-  for (const candle of groupSnapshotsByDay(snapshots)) {
+  for (const c of candlesToOhlc(candles)) {
     out.push({
-      time: candle.time as UTCTimestamp,
-      value: candle.close,
+      time: c.time as UTCTimestamp,
+      value: c.close,
     });
   }
   return out;
@@ -178,9 +192,9 @@ export function toLinePoints(
 // ---------------------------------------------------------------------------
 
 export interface ISwingPoint {
-  /** Index in the snapshots array. */
+  /** Index in the candles array. */
   index: number;
-  /** Unix-seconds timestamp (matches the snapshot timestamp). */
+  /** Unix-seconds timestamp (the candle's bucket-start, UTC midnight). */
   time: UTCTimestamp;
   /** Price at the swing point (already a JS number). */
   price: number;
@@ -191,9 +205,8 @@ export interface ISwingPoint {
 /**
  * Find swing-high and swing-low points in a price series.
  *
- * Operates on the COLLAPSED daily candles (see `snapshotsToCandles`),
- * not on the raw snapshots, so the markers line up with the
- * visible candles on the chart.
+ * Operates on the daily candles (see `candlesToOhlc`), so the
+ * markers line up with the visible candles on the chart.
  *
  * Definition: the swing HIGH is the FIRST candle with the
  * highest price in the series. The swing LOW is the FIRST candle
@@ -218,31 +231,31 @@ export interface ISwingPoint {
  * is empty, has fewer than 2 points, or `window <= 0`.
  */
 export function findSwingPoints(
-  snapshots: readonly IHistorySnapshotDTO[],
+  candles: readonly IHistoryCandleDTO[],
   window = 3,
 ): ISwingPoint[] {
   if (window <= 0) return [];
-  const candles = groupSnapshotsByDay(snapshots);
-  if (candles.length < 2) return [];
+  const ohlc = candlesToOhlc(candles);
+  if (ohlc.length < 2) return [];
 
   let highIdx = 0;
   let lowIdx = 0;
-  for (let i = 1; i < candles.length; i++) {
-    if (candles[i]!.high > candles[highIdx]!.high) highIdx = i;
-    if (candles[i]!.low < candles[lowIdx]!.low) lowIdx = i;
+  for (let i = 1; i < ohlc.length; i++) {
+    if (ohlc[i]!.high > ohlc[highIdx]!.high) highIdx = i;
+    if (ohlc[i]!.low < ohlc[lowIdx]!.low) lowIdx = i;
   }
 
   const swings: ISwingPoint[] = [
     {
       index: highIdx,
-      time: candles[highIdx]!.time as UTCTimestamp,
-      price: candles[highIdx]!.high,
+      time: ohlc[highIdx]!.time as UTCTimestamp,
+      price: ohlc[highIdx]!.high,
       kind: 'high',
     },
     {
       index: lowIdx,
-      time: candles[lowIdx]!.time as UTCTimestamp,
-      price: candles[lowIdx]!.low,
+      time: ohlc[lowIdx]!.time as UTCTimestamp,
+      price: ohlc[lowIdx]!.low,
       kind: 'low',
     },
   ];
@@ -288,10 +301,10 @@ export function buildSwingMarkers(
  * never call `createChart` twice on the same canvas (which
  * lightweight-charts rejects).
  *
- * Data path: raw snapshots → daily buckets (via
- * `groupSnapshotsByDay`) → area-series points (one per day,
+ * Data path: daily candles (already bucketed by the
+ * `HistoryAggregator`) → area-series points (one per day,
  * plotting each day's `close`) → `series.setData`. Swing markers
- * + price-line overlays operate on the daily-bucketed scale.
+ * + price-line overlays operate on the daily candle scale.
  */
 export function applyDataAndOverlays(
   series: ISeriesApi<'Area'>,
@@ -303,11 +316,11 @@ export function applyDataAndOverlays(
   // Remove stale overlays.
   for (const line of previous) series.removePriceLine(line);
 
-  const candles = snapshotsToCandles(input.snapshots);
-  series.setData(toLinePoints(input.snapshots));
+  const candles = candlesToOhlc(input.candles);
+  series.setData(toLinePoints(input.candles));
 
   // Replace markers — empty array clears.
-  const swings = findSwingPoints(input.snapshots, input.swingWindow ?? 3);
+  const swings = findSwingPoints(input.candles, input.swingWindow ?? 3);
   const markers = buildSwingMarkers(swings, input.token1Symbol);
   markersPlugin.setMarkers(markers);
 
@@ -489,12 +502,12 @@ export function formatCrosshair({
  * stays consistent with what the user sees on the line.
  */
 export function buildPriceBadge({
-  snapshots,
+  candles,
   strategyRange,
   token1Symbol,
   token0Symbol,
 }: {
-  snapshots: readonly IHistorySnapshotDTO[];
+  candles: readonly IHistoryCandleDTO[];
   strategyRange: IPriceChartRange | null | undefined;
   token1Symbol: string;
   token0Symbol: string;
@@ -506,8 +519,8 @@ export function buildPriceBadge({
   swingHighLabel: string;
   swingLowLabel: string;
 } {
-  const candles = groupSnapshotsByDay(snapshots);
-  const last = candles[candles.length - 1];
+  const ohlc = candlesToOhlc(candles);
+  const last = ohlc[ohlc.length - 1];
   const lastPrice = last
     ? `${formatAxisPrice(last.close)} ${token1Symbol} / ${token0Symbol}`
     : `— ${token1Symbol} / ${token0Symbol}`;
@@ -523,7 +536,7 @@ export function buildPriceBadge({
   // Surface the top-1 swing high / low prices in the badge so the
   // user sees them as text even when the in-chart markers are
   // cropped by the right gutter.
-  const swings = findSwingPoints(snapshots, 3);
+  const swings = findSwingPoints(candles, 3);
   const highest = swings
     .filter((s) => s.kind === 'high')
     .reduce<ISwingPoint | null>((best, s) => (best === null || s.price > best.price) ? s : best, null);
