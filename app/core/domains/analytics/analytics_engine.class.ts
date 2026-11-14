@@ -159,14 +159,17 @@ export class AnalyticsEngine {
   }
 
   /**
-   * Compute the CL capital-efficiency ratio for a tick range.
+   * Compute the CL capital efficiency of a tick range versus a
+   * full-range position of equal value (see
+   * `capitalEfficiencyRatio`), scaled at `CAPITAL_EFFICIENCY_SCALE`
+   * (1e18 == 1×). ±10% ≈ 20×, ±5% ≈ 40×; **narrower ⇒ higher**.
    *
-   * `ceRatio = P_upper / P_lower`, scaled at
-   * `CAPITAL_EFFICIENCY_SCALE` (1e18 == 1× V2-equivalent). A range
-   * of 2× in price yields CE=2; 10× yields CE=10.
+   * @param range - Tick range.
+   * @param currentTick - Pool tick the position is opened at. When
+   *   omitted the symmetric (mid-range) case is used.
    */
-  capitalEfficiency(range: TickRange): bigint {
-    return capitalEfficiencyRatio(range.tickLower, range.tickUpper);
+  capitalEfficiency(range: TickRange, currentTick?: number): bigint {
+    return capitalEfficiencyRatio(range.tickLower, range.tickUpper, currentTick);
   }
 
   /**
@@ -260,7 +263,7 @@ export class AnalyticsEngine {
     const side = this.positionSide(pool, position);
     return {
       il: this.ilAtCurrentPrice(pool, entryPrice),
-      ce: this.capitalEfficiency(position.range),
+      ce: this.capitalEfficiency(position.range, pool.state.tick),
       inRange: side.inRange,
       side: side.side,
     };

@@ -3,6 +3,7 @@
 import {
   CAPITAL_EFFICIENCY_SCALE,
   IL_SCALE,
+  capitalEfficiencyRatio,
   ilBetweenPrices,
 } from '../../math';
 import type { Price } from '../../shared/value_objects';
@@ -211,7 +212,7 @@ export class FuturePriceSimulation
     // 3. Capital efficiency of the position's range.
     const ce = (position.range.tickUpper - position.range.tickLower) === 0
       ? 0n
-      : this.ceFromTicks(position.range.tickLower, position.range.tickUpper);
+      : capitalEfficiencyRatio(position.range.tickLower, position.range.tickUpper, pool.state.tick);
 
     // 4. Terminal value + PnL + return.
     const { terminalValue, totalReturn } = this.computeTerminalValue(
@@ -232,33 +233,6 @@ export class FuturePriceSimulation
       apr1y,
       capitalEfficiency: ce,
     };
-  }
-
-  /**
-   * Compute the CL capital-efficiency ratio for a tick range using
-   * the formula `ce = P_upper / P_lower` at `CAPITAL_EFFICIENCY_SCALE`.
-   *
-   * Inlined here (rather than calling
-   * `capitalEfficiencyRatio(...)`) so the simulation has no
-   * dependency on `app/core/math` beyond what the IL math
-   * transitively needs — keeps the data flow obvious in the
-   * output. The math module re-export is still available via
-   * `AnalyticsEngine.capitalEfficiency(range)` if the caller
-   * wants the same value computed at a different scale.
-   */
-  private ceFromTicks(tickLower: number, tickUpper: number): bigint {
-    // P(tick) = 1.0001^tick * 10^(token1Dec - token0Dec).
-    // Ratio = 1.0001^(tickUpper - tickLower) at SCALE.
-    // We compute via Number (tick counts are small) and rescale.
-    const exp = (tickUpper - tickLower) * Math.log(1.0001);
-    const ratio = Math.exp(exp);
-
-    if (!Number.isFinite(ratio) || ratio <= 0) {
-      return 0n;
-    }
-
-    // 1e18 == 1×, so multiply by 1e18 and floor to bigint.
-    return BigInt(Math.floor(ratio * Number(FuturePriceSimulation.CAPITAL_EFFICIENCY_SCALE)));
   }
 
   /**

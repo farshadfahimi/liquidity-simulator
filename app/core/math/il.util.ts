@@ -23,6 +23,8 @@
  * indicator from the domain layer to express the full picture.
  */
 
+import { MIN_TICK, MAX_TICK, sqrtRatioAtTick } from './tick_math.util';
+
 /** Bigint scale used for all IL outputs (1e18 == 100%). */
 export const IL_SCALE = 1_000_000_000_000_000_000n; // 1e18
 
@@ -147,4 +149,60 @@ export function ilBetweenPrices(
   }
 
   return ilFromPriceRatio(ratio, outDecimals);
+}
+/**
+ * Stress IL for a CL range: the **worse** (more negative) of the V2
+ * impermanent loss if the price drifts from the current tick to
+ * `tickLower` or to `tickUpper`.
+ *
+ * Why this exists: "IL at the current price versus the entry price"
+ * is identically 0 when the entry price *is* the current price (the
+ * recommendation flow's default), so it cannot tell candidates
+ * apart. The edge IL does — wide ranges can lose a lot before they
+ * exit, narrow ones lose little — and it needs no extra inputs.
+ *
+ * Like all V2-style IL it is a lower bound of the real CL loss
+ * (a CL position fully converts at the edge, which is worse).
+ *
+ * @param tickLower - Lower tick of the range.
+ * @param tickUpper - Upper tick of the range.
+ * @param currentTick - Pool tick; clamped into the range.
+ * @returns IL at `IL_SCALE` (1e18 == 100%), in `[-1e18, 0]`.
+ */
+export function ilAtRangeEdges(
+  tickLower: number,
+  tickUpper: number,
+  currentTick: number,
+): bigint {
+  if (!Number.isInteger(tickLower) || !Number.isInteger(tickUpper) || !Number.isInteger(currentTick)) {
+    throw new Error(
+      `ilAtRangeEdges ticks must be integers, got ${tickLower}, ${tickUpper}, ${currentTick}`,
+    );
+  }
+
+  if (tickLower < MIN_TICK || tickUpper > MAX_TICK || tickLower >= tickUpper) {
+    throw new Error(`ilAtRangeEdges invalid range [${tickLower}, ${tickUpper}]`);
+  }
+
+  const tick = Math.min(Math.max(currentTick, tickLower), tickUpper);
+  const sqrtP = sqrtRatioAtTick(tick);
+
+  const edgeIl = (edgeTick: number): bigint => {
+    const sqrtEdge = sqrtRatioAtTick(edgeTick);
+    // p = (√edge / √P)² at 18 decimals.
+    const p = (sqrtEdge * sqrtEdge * IL_SCALE) / (sqrtP * sqrtP);
+
+    // A ratio that underflows 18 decimals (|ln p| > ~41) is a
+    // ≈ total loss; ilFromPriceRatio rejects p == 0.
+    if (p === 0n) {
+      return -IL_SCALE;
+    }
+
+    return ilFromPriceRatio(p, 18);
+  };
+
+  const lowerIl = edgeIl(tickLower);
+  const upperIl = edgeIl(tickUpper);
+
+  return lowerIl < upperIl ? lowerIl : upperIl;
 }

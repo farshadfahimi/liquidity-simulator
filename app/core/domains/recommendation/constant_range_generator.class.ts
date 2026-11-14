@@ -1,7 +1,7 @@
 // app/core/domains/recommendation/constant_range_generator.class.ts
 
 import { TickRange } from '../../shared/value_objects';
-import { MIN_TICK } from '../../math';
+import { MAX_TICK, MIN_TICK } from '../../math';
 import type { Pool } from '../pool';
 import type { IRangeGenerator } from './range_generator.interface';
 
@@ -53,7 +53,11 @@ export class ConstantRangeGenerator implements IRangeGenerator {
   generate(pool: Pool): readonly TickRange[] {
     const tickSpacing = pool.state.tickSpacing;
     const currentTick = pool.state.tick;
-    const ticks = 887272;
+    // Usable bounds: the V3 envelope rounded *inward* to a multiple of
+    // tickSpacing. Clamping to the raw ±887272 yields ticks that are not
+    // multiples of the spacing, which a real mint would reject.
+    const minUsable = Math.ceil(MIN_TICK / tickSpacing) * tickSpacing;
+    const maxUsable = Math.floor(MAX_TICK / tickSpacing) * tickSpacing;
 
     const result: TickRange[] = [];
     for (const widthMultiples of this.widthsTicks) {
@@ -65,9 +69,9 @@ export class ConstantRangeGenerator implements IRangeGenerator {
       lower = Math.floor(lower / tickSpacing) * tickSpacing;
       upper = Math.ceil(upper / tickSpacing) * tickSpacing;
 
-      // Clamp to V3 envelope.
-      lower = Math.max(MIN_TICK, lower);
-      upper = Math.min(ticks, upper);
+      // Clamp to the spacing-aligned V3 envelope.
+      lower = Math.max(minUsable, lower);
+      upper = Math.min(maxUsable, upper);
 
       if (lower >= upper) {
         continue;

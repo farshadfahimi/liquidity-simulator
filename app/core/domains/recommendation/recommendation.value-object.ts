@@ -64,9 +64,10 @@ export interface IRecommendationFields {
   readonly feeRatePerSecond: bigint;
 
   /**
-   * IL at the current pool price vs the candidate's entry price.
-   * At `IL_SCALE`. Negative == loss vs HODL. `0n` if the strategy
-   * doesn't compute IL (rare).
+   * Stress IL: the worse V2-style impermanent loss if the price drifts
+   * from the current tick to either edge of the candidate range (see
+   * `ilAtRangeEdges`). At `IL_SCALE`; negative == loss vs HODL. The
+   * field keeps its historical name for DTO/UI compatibility.
    */
   readonly ilAtCurrentPrice: bigint;
 

@@ -22,7 +22,8 @@ import {
   createPool,
   createPoolHistory,
 } from '@core/domains';
-import { Price, sqrtPriceX96ToPrice, sqrtRatioAtTick } from '@core/shared/value_objects';
+import { sqrtRatioAtTick } from '@core/math';
+import { Price, sqrtPriceX96ToPrice } from '@core/shared/value_objects';
 import { SECONDS_PER_YEAR, VOLATILITY_SCALE } from '@core/math';
 
 import {

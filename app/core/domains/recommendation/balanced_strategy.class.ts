@@ -2,10 +2,11 @@
 
 import {
   APR_SCALE,
-  CAPITAL_EFFICIENCY_SCALE,
+  CE_FACTOR_CEILING,
   SCORE_SCALE,
+  capitalEfficiencyFactor,
   capitalEfficiencyRatio,
-  ilBetweenPrices,
+  ilAtRangeEdges,
 } from '../../math';
 import type { Price } from '../../shared/value_objects';
 import type { Pool } from '../pool';
@@ -23,7 +24,8 @@ import type { IRecommendationStrategy } from '../strategy';
  * `riskFreeApr` — subtracted from APR. Default 0.
  *
  * `entryPrice` — the price the user is presumed to be entering at.
- * Used for the IL penalty term. Typically `pool.currentPrice(18)`.
+ * Kept for API compatibility; the IL term no longer depends on it
+ * (see {@link ilAtRangeEdges}: entry == current made IL identically 0).
  *
  * The strategy is the "default sensible LP choice": it rewards APR
  * and capital efficiency while penalizing IL. The exact shape is a
@@ -49,10 +51,13 @@ export interface IBalancedStrategyOptions {
  *   - `aprFactor = (1 + apr / spy)^1` — soft APR contribution; we
  *     cap it at `1e18` so a candidate with apr ≥ 100% APR earns the
  *     full APR factor.
- *   - `ceFactor = min(ce, MAX_CE) / MAX_CE` — normalized CE.
- *   - `ilFactor = 1 + il / SCORE_SCALE` — IL is `≤ 0`, so this is
+ *   - `ceFactor = ln(ce) / ln(MAX_CE)` — CE on a log scale; tight
+ *     ranges (high CE) score high, a full-range span scores 0.
+ *   - `ilFactor = 1 + il / SCORE_SCALE` — `il` is the stress IL at the
+ *     worse range edge ({@link ilAtRangeEdges}), `≤ 0`, so this is
  *     `≤ 1.0`. A `−2% IL` candidate has ilFactor `≈ 0.98`. We floor
- *     at `0` so that `IL < −100%` zeroes the score.
+ *     at `0` so that `IL ≤ −100%` zeroes the score (absurdly wide
+ *     ranges).
  *
  * Multiplicative blend keeps any "I have a great APR but my IL is
  * terrible" candidate from winning the ranking.
@@ -73,8 +78,8 @@ export class BalancedStrategy implements IRecommendationStrategy {
   /** APR factor saturates at 100%/year. */
   static readonly APR_FACTOR_CAP = APR_SCALE;
 
-  /** CE factor saturates at 5× V2-equivalent (typical max for CL). */
-  static readonly MAX_CE = 5n * CAPITAL_EFFICIENCY_SCALE;
+  /** CE factor saturates at 100× (≈ a ±1% range). */
+  static readonly MAX_CE = CE_FACTOR_CEILING;
 
   constructor(options: IBalancedStrategyOptions) {
     if (options.expectedApr < 0n) {
@@ -102,16 +107,18 @@ export class BalancedStrategy implements IRecommendationStrategy {
   }
 
   score(pool: Pool, position: Position): bigint {
-    // CE factor: clamp CE ∈ [0, MAX_CE], normalize.
-    const ce = capitalEfficiencyRatio(position.range.tickLower, position.range.tickUpper);
+    // CE factor: log-normalised capital efficiency at the pool's
+    // current tick. 0 for a (near) full-range span.
+    const ce = capitalEfficiencyRatio(
+      position.range.tickLower,
+      position.range.tickUpper,
+      pool.state.tick,
+    );
+    const ceFactor = capitalEfficiencyFactor(ce, BalancedStrategy.MAX_CE);
 
-    if (ce <= 0n) {
+    if (ceFactor === 0n) {
       return 0n;
     }
-
-    const ceFactor = ce >= BalancedStrategy.MAX_CE
-      ? SCORE_SCALE
-      : (ce * SCORE_SCALE) / BalancedStrategy.MAX_CE;
 
     // APR factor: clamp APR ∈ [0, 100%].
     const excessApr = this.expectedApr - this.riskFreeApr;
@@ -124,14 +131,12 @@ export class BalancedStrategy implements IRecommendationStrategy {
       ? SCORE_SCALE
       : (excessApr * SCORE_SCALE) / BalancedStrategy.APR_FACTOR_CAP;
 
-    // IL factor: compute IL at current price vs entry. ilFactor is
-    // 1 + IL (where IL ≤ 0); floor at 0.
-    const il = ilBetweenPrices(
-      pool.currentPrice(this.entryPrice.decimals).value,
-      this.entryPrice.decimals,
-      this.entryPrice.value,
-      this.entryPrice.decimals,
-      18,
+    // IL factor: stress IL at the worse range edge. (IL at the current
+    // price vs the entry price is 0 whenever entry == current.)
+    const il = ilAtRangeEdges(
+      position.range.tickLower,
+      position.range.tickUpper,
+      pool.state.tick,
     );
 
     // ilFactor at SCORE_SCALE = (1 + il) at SCORE_SCALE precision.

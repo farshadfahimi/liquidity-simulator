@@ -1,7 +1,7 @@
 // app/core/domains/recommendation/volatility_adjusted_range_generator.class.ts
 
 import { TickRange } from '../../shared/value_objects';
-import { MIN_TICK } from '../../math';
+import { MAX_TICK, MIN_TICK } from '../../math';
 import type { Pool } from '../pool';
 import type { IRangeGenerator } from './range_generator.interface';
 
@@ -14,8 +14,12 @@ import type { IRangeGenerator } from './range_generator.interface';
  *   emits ranges with half-widths `[500, 1000, 2000]` ticks around
  *   the current tick.
  * - `dailySigmaTicks` — observed per-day standard deviation of the
- *   price, expressed in *tick* units (the caller converts their
- *   realized vol → ticks-per-day outside).
+ *   price, expressed in *tick* units (ticks per day, real-valued, **not** an
+ *   annualized figure). Derive it with `dailySigmaTicksFromSigmaPerSecond`
+ *   / `blendedSigmaTicksPerSecond` (history) or
+ *   `dailySigmaTicksFromAnnualVol` (an annualized vol) from
+ *   `@core/math` — passing an annualized number here inflates the
+ *   range ≈ 19×.
  * - `tickSpacing` override (optional). Defaults to the pool's
  *   `tickSpacing`.
  *
@@ -63,9 +67,12 @@ export class VolatilityAdjustedRangeGenerator implements IRangeGenerator {
   readonly tickSpacingOverride: number | undefined;
 
   constructor(options: IVolatilityAdjustedRangeGeneratorOptions) {
-    if (!Number.isInteger(options.dailySigmaTicks) || options.dailySigmaTicks <= 0) {
+    // Real-valued on purpose: the half-width `mult · σ` is rounded to whole
+    // ticks below, and forcing σ itself to an integer would distort
+    // low-volatility (e.g. stable/stable) pools by tens of percent.
+    if (!Number.isFinite(options.dailySigmaTicks) || options.dailySigmaTicks <= 0) {
       throw new Error(
-        `VolatilityAdjustedRangeGenerator.dailySigmaTicks must be a positive integer, `
+        `VolatilityAdjustedRangeGenerator.dailySigmaTicks must be a positive finite number, `
         + `got ${options.dailySigmaTicks}`,
       );
     }
@@ -101,9 +108,14 @@ export class VolatilityAdjustedRangeGenerator implements IRangeGenerator {
   generate(pool: Pool): readonly TickRange[] {
     const tickSpacing = this.tickSpacingOverride ?? pool.state.tickSpacing;
     const currentTick = pool.state.tick;
-    const ticks = 887272;
+    // Usable bounds: the V3 envelope rounded *inward* to a multiple of
+    // tickSpacing. Clamping to the raw ±887272 yields ticks that are not
+    // multiples of the spacing, which a real mint would reject.
+    const minUsable = Math.ceil(MIN_TICK / tickSpacing) * tickSpacing;
+    const maxUsable = Math.floor(MAX_TICK / tickSpacing) * tickSpacing;
 
     const result: TickRange[] = [];
+    const seen = new Set<string>();
     for (const mult of this.sigmaMultipliers) {
       const halfWidth = Math.round(mult * this.dailySigmaTicks);
       let lower = currentTick - halfWidth;
@@ -113,13 +125,21 @@ export class VolatilityAdjustedRangeGenerator implements IRangeGenerator {
       lower = Math.floor(lower / tickSpacing) * tickSpacing;
       upper = Math.ceil(upper / tickSpacing) * tickSpacing;
 
-      // Clamp to V3 envelope.
-      lower = Math.max(MIN_TICK, lower);
-      upper = Math.min(ticks, upper);
+      // Clamp to the spacing-aligned V3 envelope.
+      lower = Math.max(minUsable, lower);
+      upper = Math.min(maxUsable, upper);
 
       if (lower >= upper) {
         continue;
       }
+
+      // Several multipliers can collapse onto the same aligned range
+      // (tiny σ / large tickSpacing); emit each distinct range once.
+      const key = `${lower}:${upper}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
 
       result.push(new TickRange(lower, upper));
     }

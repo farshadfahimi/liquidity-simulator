@@ -1,8 +1,14 @@
 // app/core/application/use_cases/compare_strategies.use_case.ts
 
 import {
+  blendedSigmaTicksPerSecond,
+  dailySigmaTicksFromAnnualVol,
+  dailySigmaTicksFromSigmaPerSecond,
+} from '../../math';
+import {
   RecommendationEngine,
   ConstantRangeGenerator,
+  VolatilityAdjustedRangeGenerator,
   ScoringConfig,
   BalancedStrategy,
   MaximumFeeStrategy,
@@ -15,6 +21,7 @@ import {
 import type { Pool } from '../../domains/pool';
 import { InvalidUseCaseInputError } from '../errors/invalid_input_error';
 import type { IRecommendationDTO } from '../dtos/recommendation.dto';
+import type { IPoolHistoryDTO } from '../dtos/pool_history.dto';
 
 /**
  * Input for {@link CompareStrategiesUseCase}.
@@ -23,9 +30,30 @@ import type { IRecommendationDTO } from '../dtos/recommendation.dto';
  * `adapter.getPoolState(...)` wrapped through {@link AnalyzePoolUseCase}).
  *
  * `generator` is the {@link IRangeGenerator} the use case should
- * feed into the recommendation engine. When omitted, the use case
- * builds a {@link ConstantRangeGenerator} over `widthsTicks` (default
- * 5 widths spanning tight to very wide).
+ * feed into the recommendation engine. When omitted the use case
+ * picks one, in this order:
+ *
+ *   1. `widthsTicks` given → {@link ConstantRangeGenerator} over those
+ *      widths (explicit opt-in; widths are multiples of the pool's
+ *      `tickSpacing`, so they mean different things per fee tier).
+ *   2. `history` given with `source === 'on-chain'` and enough samples →
+ *      {@link VolatilityAdjustedRangeGenerator} fed by the σ measured
+ *      in tick space over the trailing 14 / 30 / 60 days.
+ *   3. otherwise → the same generator fed by `annualizedVolatility`
+ *      (default 50%) converted to daily ticks.
+ *
+ * In (2) and (3) the half-widths are `k · σ_daily · √horizonDays`
+ * ticks for each `k` in `kValues`, so they are independent of the
+ * fee tier / tickSpacing and of token decimals.
+ *
+ * `history` is the result of `GetPoolHistoryUseCase` (ideally a
+ * ≥ 30-day window). Synthetic histories are ignored for σ — their
+ * volatility is made up. When `annualizedVolatility` is omitted it
+ * is taken from `history.annualizedVolatility` (if on-chain and > 0).
+ *
+ * `horizonDays` (default 7) is how long the position is expected to
+ * be held before rebalancing; `kValues` (default `[1, 1.65, 2, 2.5]`)
+ * are the σ-multipliers of the candidate ranges.
  *
  * `strategies` is the list of strategies to score with. When omitted,
  * the use case builds the default 5 strategies (Balanced,
@@ -54,7 +82,22 @@ export interface ICompareStrategiesInput {
   readonly riskFreeApr?: bigint;
 
   readonly widthsTicks?: readonly number[];
+
+  readonly history?: IPoolHistoryDTO;
+
+  readonly horizonDays?: number;
+
+  readonly kValues?: readonly number[];
 }
+
+/** Default σ-multipliers: ≈ 68% / 90% / 95% / 99% end-of-horizon coverage. */
+export const DEFAULT_K_VALUES: readonly number[] = [1, 1.65, 2, 2.5];
+
+/** Default holding horizon, in days. */
+export const DEFAULT_HORIZON_DAYS = 7;
+
+/** Minimum samples before a history is trusted for σ. */
+const MIN_HISTORY_SAMPLES = 10;
 
 /**
  * Strategy-comparison use case: the LP recommendation flow described
@@ -89,12 +132,34 @@ export class CompareStrategiesUseCase {
     const entryPrice = input.pool.currentPrice(18);
 
     const expectedApr = input.expectedApr ?? 3n * 10n ** 17n; // 30%
-    const annualizedVolatility = input.annualizedVolatility ?? 5n * 10n ** 17n; // 50%
     const riskFreeApr = input.riskFreeApr ?? 0n;
+    const horizonDays = input.horizonDays ?? DEFAULT_HORIZON_DAYS;
+    const kValues = input.kValues ?? DEFAULT_K_VALUES;
 
-    const generator = input.generator ?? new ConstantRangeGenerator({
-      widthsTicks: input.widthsTicks ?? [100, 500, 2000, 10000, 50000],
-    });
+    if (!Number.isFinite(horizonDays) || horizonDays <= 0) {
+      throw new InvalidUseCaseInputError(this.id, 'horizonDays', 'must be a positive number');
+    }
+
+    if (kValues.length === 0 || kValues.some((k) => !Number.isFinite(k) || k <= 0)) {
+      throw new InvalidUseCaseInputError(this.id, 'kValues', 'must be a non-empty list of positive numbers');
+    }
+
+    const onChainHistory = input.history
+      && input.history.source === 'on-chain'
+      && input.history.snapshots.length >= MIN_HISTORY_SAMPLES
+      ? input.history
+      : null;
+
+    const historyVol = onChainHistory && onChainHistory.annualizedVolatility > 0n
+      ? onChainHistory.annualizedVolatility
+      : undefined;
+
+    const annualizedVolatility = input.annualizedVolatility
+      ?? historyVol
+      ?? 5n * 10n ** 17n; // 50% prior
+
+    const generator = input.generator
+      ?? this.buildGenerator(input, onChainHistory, annualizedVolatility, horizonDays, kValues);
 
     const strategies = input.strategies ?? [
       new BalancedStrategy({
@@ -127,6 +192,47 @@ export class CompareStrategiesUseCase {
     });
 
     return toRecommendationDTO(set, input.protocolId ?? '');
+  }
+
+  /**
+   * Pick the default range generator (see {@link ICompareStrategiesInput}).
+   * Half-width for each `k` is `k · σ_daily · √horizonDays` ticks.
+   */
+  private buildGenerator(
+    input: ICompareStrategiesInput,
+    history: IPoolHistoryDTO | null,
+    annualizedVolatility: bigint,
+    horizonDays: number,
+    kValues: readonly number[],
+  ): IRangeGenerator {
+    if (input.widthsTicks) {
+      return new ConstantRangeGenerator({ widthsTicks: input.widthsTicks });
+    }
+
+    let dailySigmaTicks: number | null = null;
+
+    if (history) {
+      try {
+        dailySigmaTicks = dailySigmaTicksFromSigmaPerSecond(
+          blendedSigmaTicksPerSecond(history.snapshots),
+        );
+      } catch {
+        // Too few distinct timestamps / samples: fall back to the vol prior.
+        dailySigmaTicks = null;
+      }
+    }
+
+    if (dailySigmaTicks === null || !(dailySigmaTicks > 0)) {
+      dailySigmaTicks = dailySigmaTicksFromAnnualVol(annualizedVolatility);
+    }
+
+    // Flat history / zero vol: keep a strictly positive σ so candidates exist.
+    dailySigmaTicks = Math.max(dailySigmaTicks, 1e-6);
+
+    return new VolatilityAdjustedRangeGenerator({
+      dailySigmaTicks,
+      sigmaMultipliers: kValues.map((k) => k * Math.sqrt(horizonDays)),
+    });
   }
 }
 

@@ -101,12 +101,15 @@ export class HighestSharpeStrategy implements IRecommendationStrategy {
   }
 
   score(pool: Pool, position: Position): bigint {
-    const ce = capitalEfficiencyRatio(position.range.tickLower, position.range.tickUpper);
+    const ce = capitalEfficiencyRatio(
+      position.range.tickLower,
+      position.range.tickUpper,
+      pool.state.tick,
+    );
 
-    // Gate: any valid range has CE > 1× (a non-zero tick width
-    // implies P_upper > P_lower, so CE = P_upper/P_lower > 1). The
-    // check below is defensive — it catches the (impossible) case
-    // where `capitalEfficiencyRatio` returns ≤ 0 due to a bug.
+    // Gate: any valid range has CE ≥ 1×. The check below is
+    // defensive — it catches the (impossible) case where
+    // `capitalEfficiencyRatio` returns ≤ 0 due to a bug.
     if (ce <= 0n) {
       return 0n;
     }

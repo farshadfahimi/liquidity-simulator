@@ -97,12 +97,29 @@ async function loadRecommendation() {
     const state = await adapter.getPoolState(poolAddress.value as TAddress);
     const aggregate = new Pool(state, chainId.value);
 
-    const { compareStrategies } = useCases();
+    const { compareStrategies, getPoolHistory } = useCases();
+
+    // Ranges are sized from the pool's own measured volatility (σ in tick
+    // space over the trailing 14/30/60 days). If history can't be fetched
+    // the use case falls back to a 50% annualized-vol prior.
+    let history;
+    try {
+      history = await getPoolHistory.execute({
+        pool: poolAddress.value as TAddress,
+        chainId: chainId.value,
+        protocolId: protocolId.value,
+        window: { kind: 'days', days: 60 },
+      });
+    }
+    catch {
+      history = undefined;
+    }
+
     const result = compareStrategies.execute({
       pool: aggregate,
       protocolId: protocolId.value,
-      expectedApr: 300_000_000_000_000_000n, // 30%
-      annualizedVolatility: 500_000_000_000_000_000n, // 50%
+      history,
+      horizonDays: 7,
     });
     recommendation.value = result;
   }

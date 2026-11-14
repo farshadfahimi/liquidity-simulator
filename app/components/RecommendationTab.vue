@@ -64,7 +64,7 @@ defineEmits<{
           { accessorKey: 'tickUpper', header: 'tickUpper' },
           { accessorKey: 'score', header: 'Score' },
           { accessorKey: 'expectedApr', header: 'APR' },
-          { accessorKey: 'ilAtCurrentPrice', header: 'IL (now)' },
+          { accessorKey: 'ilAtCurrentPrice', header: 'IL (range edge)' },
           { accessorKey: 'capitalEfficiency', header: 'CE' },
           { accessorKey: 'side', header: 'Side' },
         ]"

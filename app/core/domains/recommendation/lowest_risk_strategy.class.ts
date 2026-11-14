@@ -1,10 +1,11 @@
 // app/core/domains/recommendation/lowest_risk_strategy.class.ts
 
 import {
-  CAPITAL_EFFICIENCY_SCALE,
+  CE_FACTOR_CEILING,
   SCORE_SCALE,
+  capitalEfficiencyFactor,
   capitalEfficiencyRatio,
-  ilBetweenPrices,
+  ilAtRangeEdges,
 } from '../../math';
 import type { Price } from '../../shared/value_objects';
 import type { Pool } from '../pool';
@@ -15,18 +16,20 @@ import type { IRecommendationStrategy } from '../strategy';
  * Options for {@link LowestRiskStrategy}.
  *
  * `entryPrice` — the price the user is presumed to be entering at.
- * Used for the IL penalty term. Typically `pool.currentPrice(18)`.
+ * Kept for API compatibility; the IL term no longer depends on it.
  *
  * Strategy: the user wants the *widest, lowest-IL, most-likely-to-be
  * in-range* range. We penalize CE (tighter == riskier) and penalize
- * IL at the current price. APR is ignored — risk-only.
+ * the stress IL at the range edge. APR is ignored — risk-only.
  *
- *     score = (1 − ceFactor) × (1 + ilAtCurrentPrice)
+ *     score = (1 − ceFactor) × (1 + ilAtRangeEdges)
  *
  * where:
- *   - `ceFactor = min(ce, MAX_CE) / MAX_CE` — saturates at MAX_CE.
- *   - `(1 + ilAtCurrentPrice)` is at `SCORE_SCALE`. `il ≤ 0`, so
- *     this is `≤ 1`. We floor at 0 so `il < −100%` zeroes the score.
+ *   - `ceFactor = ln(ce) / ln(MAX_CE)` — log-scaled, saturates at
+ *     MAX_CE. Wide ranges (low CE) have a low `ceFactor`.
+ *   - `(1 + ilAtRangeEdges)` is at `SCORE_SCALE`. `il ≤ 0`, so
+ *     this is `≤ 1`. We floor at 0 so `il ≤ −100%` zeroes the score,
+ *     which keeps absurdly wide ranges from winning.
  */
 export interface ILowestRiskStrategyOptions {
   readonly entryPrice: Price;
@@ -47,8 +50,8 @@ export class LowestRiskStrategy implements IRecommendationStrategy {
 
   readonly entryPrice: Price;
 
-  /** CE factor saturates at 5× V2-equivalent (typical CL upper bound). */
-  static readonly MAX_CE = 5n * CAPITAL_EFFICIENCY_SCALE;
+  /** CE factor saturates at 100× (≈ a ±1% range). */
+  static readonly MAX_CE = CE_FACTOR_CEILING;
 
   constructor(options: ILowestRiskStrategyOptions) {
     if (options.entryPrice.value <= 0n) {
@@ -61,28 +64,23 @@ export class LowestRiskStrategy implements IRecommendationStrategy {
   }
 
   score(pool: Pool, position: Position): bigint {
-    const ce = capitalEfficiencyRatio(position.range.tickLower, position.range.tickUpper);
+    const ce = capitalEfficiencyRatio(
+      position.range.tickLower,
+      position.range.tickUpper,
+      pool.state.tick,
+    );
 
-    if (ce <= 0n) {
-      return 0n;
-    }
-
-    // (1 − ceFactor): wider ranges (low CE) score higher. The factor
-    // saturates at MAX_CE; ranges tighter than MAX_CE get a 0 from
-    // this term, which the multiplicative blend penalizes.
-    const ceFactor = ce >= LowestRiskStrategy.MAX_CE
-      ? SCORE_SCALE
-      : (ce * SCORE_SCALE) / LowestRiskStrategy.MAX_CE;
+    // (1 − ceFactor): wider ranges (low CE) score higher.
+    const ceFactor = capitalEfficiencyFactor(ce, LowestRiskStrategy.MAX_CE);
 
     const oneMinusCeFactor = SCORE_SCALE - ceFactor;
 
-    // IL factor at SCORE_SCALE = (1 + il) — il ≤ 0 so result ≤ 1.
-    const il = ilBetweenPrices(
-      pool.currentPrice(this.entryPrice.decimals).value,
-      this.entryPrice.decimals,
-      this.entryPrice.value,
-      this.entryPrice.decimals,
-      18,
+    // IL factor at SCORE_SCALE = (1 + il) — stress IL at the worse
+    // range edge; il ≤ 0 so the result ≤ 1.
+    const il = ilAtRangeEdges(
+      position.range.tickLower,
+      position.range.tickUpper,
+      pool.state.tick,
     );
 
     const ilFactor = il <= -SCORE_SCALE ? 0n : SCORE_SCALE + il;
