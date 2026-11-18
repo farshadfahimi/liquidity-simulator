@@ -3,19 +3,27 @@
 // app/components/ChartsTab.vue
 //
 // "Charts" tab content. Renders the price-history line chart
-// for the current pool and overlays the top-1 strategy's
-// recommended entry zone so the user can see "where to enter"
-// visually.
+// for the current pool and overlays a strategy's recommended
+// entry zone so the user can see "where to enter" visually.
 //
 // The tab orchestrates the fetch itself: it calls the
-// `getPoolHistory` use case on mount, derives the top-1
-// strategy from the recommendation DTO already loaded by the
+// `getPoolHistory` use case on mount, derives the strategy
+// range from the recommendation DTO already loaded by the
 // page, and passes the result to `<PriceChart>`.
+//
+// The user can pick WHICH strategy is overlaid (not just the
+// top-1) from the "strategy" dropdown next to the history
+// window selector. The selection is keyed by the
+// recommendation's stable `id` (`"{strategyId}:{rangeDescriptor}"`)
+// so it survives re-renders of the ranked list, and falls back
+// to the top-1 whenever the stored id is no longer in the list
+// (different pool, or a recomputed candidate set).
 
 import { computed, onMounted, ref, watch } from 'vue';
 import type {
   IPoolHistoryDTO,
   IRecommendationDTO,
+  IRecommendationEntryDTO,
   IHistoryCandleDTO,
 } from '@core/application/dtos';
 import { tickToPrice } from '@core/math';
@@ -25,6 +33,11 @@ import {
   type THistoryWindowDays,
   useSessionState,
 } from '~/composables/useSessionState';
+import {
+  buildStrategyOptions,
+  selectStrategyEntry,
+  strategyDisplayLabel,
+} from '~/utils/strategySelection';
 
 interface IProps {
   pool: string;
@@ -51,13 +64,14 @@ const windowDays = ref<THistoryWindowDays>(session.historyWindowDays.value);
 const windowOptions = HISTORY_WINDOW_DAYS.map((d) => ({ label: `${d} days`, value: d }));
 
 // -----------------------------------------------------------------
-// Top-1 strategy
+// Strategy selection
 // -----------------------------------------------------------------
 //
 // `recommendation.recommendations` is already sorted by score
 // descending (per the DTO doc), so the first element is the
-// top-1. We convert its tickLower / tickUpper to a price band
-// using `tickToPrice` so the chart can overlay a box annotation.
+// top-1. We convert the SELECTED row's tickLower / tickUpper to
+// a price band using `tickToPrice` so the chart can overlay a
+// box annotation.
 //
 // Defensive: extreme ranges (e.g. a 1M-tick "full V2" span) can
 // produce values that round to 0 at the lower bound and overflow
@@ -72,25 +86,69 @@ function toHumanPrice(price: { value: bigint; decimals: number }): number | null
   return v;
 }
 
-const topStrategy = computed(() => {
-  const top = props.recommendation?.recommendations?.[0] ?? null;
-  if (!top || !props.analysis) return null;
+/**
+ * Translate one ranked recommendation into the chart's
+ * `strategyRange` shape (price band + display metrics).
+ * Returns `null` when we lack the token decimals.
+ */
+function toStrategyRange(entry: IRecommendationEntryDTO | null) {
+  if (!entry || !props.analysis) return null;
   const t0d = props.analysis.token0.decimals;
   const t1d = props.analysis.token1.decimals;
-  const lower = tickToPrice(top.tickLower, t0d, t1d, 18);
-  const upper = tickToPrice(top.tickUpper, t0d, t1d, 18);
+  const lower = tickToPrice(entry.tickLower, t0d, t1d, 18);
+  const upper = tickToPrice(entry.tickUpper, t0d, t1d, 18);
   const lowerPrice = toHumanPrice(lower);
   const upperPrice = toHumanPrice(upper);
   return {
-    strategyName: top.strategyName,
-    tickLower: top.tickLower,
-    tickUpper: top.tickUpper,
+    strategyName: entry.strategyName,
+    tickLower: entry.tickLower,
+    tickUpper: entry.tickUpper,
     lowerPrice,
     upperPrice,
     hasFiniteBand: lowerPrice !== null && upperPrice !== null,
-    score: Number(top.score) / 1e18,
-    expectedApr: Number(top.expectedApr) / 1e18 * 100,
+    score: Number(entry.score) / 1e18,
+    expectedApr: Number(entry.expectedApr) / 1e18 * 100,
   };
+}
+
+/** The ranked rows from the recommendation DTO (score-sorted). */
+const rankedStrategies = computed<readonly IRecommendationEntryDTO[]>(
+  () => props.recommendation?.recommendations ?? [],
+);
+
+/**
+ * The row the user picked. We store the recommendation's stable
+ * `id` rather than an index: indices shift whenever the
+ * candidate set is recomputed, ids don't.
+ *
+ * `null` (nothing picked yet) means "follow the top-1", and a
+ * stale id (pool changed / different candidate set) also falls
+ * back to the top-1 rather than rendering nothing.
+ */
+const selectedStrategyId = ref<string | null>(null);
+
+const selectedEntry = computed<IRecommendationEntryDTO | null>(
+  () => selectStrategyEntry(rankedStrategies.value, selectedStrategyId.value),
+);
+
+/** The range actually overlaid on the chart. */
+const selectedStrategy = computed(() => toStrategyRange(selectedEntry.value));
+
+/** Dropdown items — one per ranked recommendation. */
+const strategyOptions = computed(
+  () => buildStrategyOptions(rankedStrategies.value),
+);
+
+/** Label of the currently applied strategy (shown in the select). */
+const selectedStrategyLabel = computed(
+  () => strategyDisplayLabel(rankedStrategies.value, selectedEntry.value),
+);
+
+/** True when the applied strategy is the default top-1 pick. */
+const isTopStrategySelected = computed(() => {
+  const rows = rankedStrategies.value;
+  const row = selectedEntry.value;
+  return rows.length > 0 && !!row && rows[0]!.id === row.id;
 });
 
 const chartTitle = computed(() => {
@@ -191,6 +249,27 @@ function formatFooterPrice(v: number | null): string {
           <span>{{ windowDays }} days</span>
         </template>
       </USelectMenu>
+      <!--
+        Strategy selector — the user picks which ranked strategy's
+        entry band is overlaid on the chart. The top-1 is the
+        default; picking another one re-draws the band in place
+        (the chart removes the previous overlay lines before
+        adding the new ones).
+      -->
+      <USelectMenu
+        :model-value="selectedStrategyId ?? selectedEntry?.id ?? null"
+        :items="strategyOptions"
+        value-key="value"
+        size="xs"
+        :disabled="strategyOptions.length === 0"
+        aria-label="Strategy to overlay on the chart"
+        @update:model-value="(v: string) => selectedStrategyId = v"
+      >
+        <template #label>
+          <UIcon name="i-lucide-target" class="size-3.5" />
+          <span>{{ selectedStrategyLabel }}</span>
+        </template>
+      </USelectMenu>
       <span>
         {{ snapshots.length }} snapshots
         <span v-if="history?.source === 'synthetic'" class="ml-2 text-amber-500">
@@ -241,7 +320,7 @@ function formatFooterPrice(v: number | null): string {
       <ClientOnly v-else>
         <PriceChart
           :candles="candles"
-          :strategy-range="topStrategy"
+          :strategy-range="selectedStrategy"
           :token0-symbol="token0Symbol"
           :token1-symbol="token1Symbol"
           :title="chartTitle"
@@ -254,20 +333,23 @@ function formatFooterPrice(v: number | null): string {
         </template>
       </ClientOnly>
 
-      <template v-if="topStrategy" #footer>
+      <template v-if="selectedStrategy" #footer>
         <div class="flex flex-wrap gap-4 text-sm">
           <div>
-            <span class="text-muted">top strategy: </span>
-            <span class="font-medium">{{ topStrategy.strategyName }}</span>
+            <span class="text-muted">{{ isTopStrategySelected ? 'top strategy' : 'strategy' }}: </span>
+            <span class="font-medium">{{ selectedStrategy.strategyName }}</span>
+            <span v-if="!isTopStrategySelected" class="ml-1 text-[10px] uppercase tracking-wide text-muted">
+              (not top-1)
+            </span>
           </div>
           <div>
             <span class="text-muted">range: </span>
-            <span class="font-mono">[{{ topStrategy.tickLower }}, {{ topStrategy.tickUpper }}]</span>
+            <span class="font-mono">[{{ selectedStrategy.tickLower }}, {{ selectedStrategy.tickUpper }}]</span>
           </div>
           <div>
             <span class="text-muted">price band: </span>
-            <span v-if="topStrategy.hasFiniteBand" class="font-mono">
-              [{{ formatFooterPrice(topStrategy.lowerPrice) }}, {{ formatFooterPrice(topStrategy.upperPrice) }}]
+            <span v-if="selectedStrategy.hasFiniteBand" class="font-mono">
+              [{{ formatFooterPrice(selectedStrategy.lowerPrice) }}, {{ formatFooterPrice(selectedStrategy.upperPrice) }}]
               <span class="text-muted">{{ token1Symbol }} / {{ token0Symbol }}</span>
             </span>
             <span v-else class="text-muted italic">
@@ -276,11 +358,11 @@ function formatFooterPrice(v: number | null): string {
           </div>
           <div>
             <span class="text-muted">score: </span>
-            <span class="font-mono">{{ topStrategy.score.toFixed(4) }}</span>
+            <span class="font-mono">{{ selectedStrategy.score.toFixed(4) }}</span>
           </div>
           <div>
             <span class="text-muted">expected APR: </span>
-            <span class="font-mono">{{ topStrategy.expectedApr.toFixed(2) }}%</span>
+            <span class="font-mono">{{ selectedStrategy.expectedApr.toFixed(2) }}%</span>
           </div>
         </div>
       </template>

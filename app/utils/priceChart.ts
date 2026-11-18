@@ -58,6 +58,14 @@ export interface ILightweightChartsModule {
   /** v5 — `chart.addSeries(AreaSeries, opts)`. */
   AreaSeries: object;
   /**
+   * v5 — `chart.addSeries(CandlestickSeries, opts)`.
+   *
+   * The series definitions are plain objects exported by the
+   * library (`candlestickSeries as CandlestickSeries`); they are
+   * handed straight to `chart.addSeries(...)`.
+   */
+  CandlestickSeries: object;
+  /**
    * v5 — `const m = createSeriesMarkers(series); m.setMarkers([...])`.
    * v4 hung `setMarkers` off the series itself; that's gone in v5.
    */
@@ -420,7 +428,7 @@ export function buildPriceChart(
       borderColor: 'rgba(148, 163, 184, 0.2)',
       timeVisible: true,
       secondsVisible: false,
-      rightOffset: 4,
+      rightOffset: 5,
     },
     crosshair: {
       vertLine: { color: 'rgba(148, 163, 184, 0.4)', labelBackgroundColor: 'rgba(51, 65, 85, 0.9)' },
@@ -447,14 +455,14 @@ export function buildPriceChart(
     topColor: 'rgba(56, 189, 248, 0.35)',
     bottomColor: 'rgba(56, 189, 248, 0.0)',
     lineColor: 'rgba(56, 189, 248, 1)',
-    lineWidth: 2,
-    relativeGradient: false,
+    lineWidth: 1,
+    relativeGradient: true,
     invertFilledArea: false,
     // Show the default "last value" badge on the right axis —
     // this gives the user a permanently-visible price number
     // on the y-axis.
-    priceLineVisible: true,
-    lastValueVisible: true,
+    priceLineVisible: false,
+    lastValueVisible: false,
   }) as ISeriesApi<'Area'>;
 
   // v5 markers plugin (replaces v4's `series.setMarkers`).
@@ -518,6 +526,7 @@ export function buildPriceBadge({
   pairLabel: string;
   swingHighLabel: string;
   swingLowLabel: string;
+  strategyLabel: string;
 } {
   const ohlc = candlesToOhlc(candles);
   const last = ohlc[ohlc.length - 1];
@@ -532,6 +541,10 @@ export function buildPriceBadge({
   const rangeLabel = strategyRange
     ? `range: [${formatAxisPrice(strategyRange.lowerPrice)}, ${formatAxisPrice(strategyRange.upperPrice)}]`
     : '';
+  // Name of the strategy whose band is currently overlaid. The
+  // user can switch strategies from the Charts tab, so the badge
+  // has to say WHICH one is applied.
+  const strategyLabel = strategyRange?.strategyName ?? '';
 
   // Surface the top-1 swing high / low prices in the badge so the
   // user sees them as text even when the in-chart markers are
@@ -557,5 +570,6 @@ export function buildPriceBadge({
     pairLabel: `${token1Symbol} / ${token0Symbol}`,
     swingHighLabel,
     swingLowLabel,
+    strategyLabel,
   };
 }
