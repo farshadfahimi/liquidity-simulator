@@ -27,8 +27,8 @@ import {
   createRecommendationEngine,
   createScoringConfig,
 } from '@core/domains';
-import { sqrtPriceX96ToPrice, sqrtRatioAtTick } from '@core/shared/value_objects';
-import { CAPITAL_EFFICIENCY_SCALE, SCORE_SCALE } from '@core/math';
+import { sqrtPriceX96ToPrice } from '@core/shared/value_objects';
+import { CAPITAL_EFFICIENCY_SCALE, SCORE_SCALE, sqrtRatioAtTick } from '@core/math';
 
 import { PRICE_DECIMALS } from '../test-constants';
 import { buildSyntheticHistory } from '../_helpers';
@@ -338,11 +338,11 @@ describe('Phase 6 — Recommendation Engine', () => {
     expect(ids1).toEqual(ids2);
   });
 
-  it('highest-capital-efficiency picks the TIGHTEST range and rejects full-range spans', async () => {
+  it('highest-capital-efficiency picks the TIGHTEST range and ranks the widest span last', async () => {
     // The strategy is documented as "I want the tightest range, period".
-    // The math must agree: the top pick has the smallest width in ticks,
-    // and ranges wider than MAX_CE (5× V2-equivalent) are dropped to
-    // score 0. The 1M-tick "full V2" span must NOT win.
+    // With the real CE (≈ 1× for a full range, growing as the range
+    // narrows) the score must fall monotonically with width, and a
+    // ~full-range span must score ≈ 0 (it can never win).
     const fixture = (await loadLivePool()) ?? syntheticFixture();
     const pool = createPool({ state: fixture.state, chainId: mainnet.id });
     const constantGen = createConstantRangeGenerator({
@@ -351,11 +351,11 @@ describe('Phase 6 — Recommendation Engine', () => {
     const candidates = constantGen.generate(pool);
     expect(candidates.length).toBeGreaterThan(1);
 
-    // Sanity: the widest candidate has CE >> MAX_CE (5× V2-equivalent).
+    // Sanity: the widest candidate is ≥ 1M ticks wide (a near-V2 span).
     const widestWidth = Math.max(
       ...candidates.map((c) => c.tickUpper - c.tickLower),
     );
-    expect(widestWidth).toBeGreaterThan(1_000_000);
+    expect(widestWidth).toBeGreaterThanOrEqual(1_000_000);
 
     const strategy = createHighestCapitalEfficiencyStrategy();
     const scoringConfig = createScoringConfig({
@@ -371,23 +371,27 @@ describe('Phase 6 — Recommendation Engine', () => {
       scoringConfig,
     });
 
-    // Strategy emits a recommendation per non-zero-scoring candidate.
-    // The full V2-like span must be dropped to score 0 (and therefore
-    // filtered out by minScoreToKeep).
     const hce = set.byStrategy('highest-capital-efficiency');
     expect(hce.length).toBeGreaterThan(0);
-    expect(hce.length).toBeLessThan(candidates.length);
 
     // Top pick must be the tightest (smallest width) range.
     const top = hce[0]!;
     const topWidth = top.range.tickUpper - top.range.tickLower;
     const minWidth = Math.min(...candidates.map((c) => c.tickUpper - c.tickLower));
     expect(topWidth).toBe(minWidth);
-
-    // The top pick's tick band must be a small fraction of the
-    // full V3 envelope (±887272). For USDC/WETH with tickSpacing=10
-    // and the smallest width=100*10=1000, the half-width is 5000
-    // ticks — well under the 1.7M-tick V3 envelope.
     expect(topWidth).toBeLessThan(20_000);
+
+    // Scores strictly decrease as the range widens.
+    const widths = hce.map((r) => r.range.tickUpper - r.range.tickLower);
+    for (let i = 1; i < widths.length; i++) {
+      expect(widths[i]!).toBeGreaterThan(widths[i - 1]!);
+      expect(hce[i]!.score).toBeLessThan(hce[i - 1]!.score);
+    }
+
+    // The near-full-range span (if kept at all) scores ≈ 0 (< 0.0001%).
+    const widest = hce.find((r) => r.range.tickUpper - r.range.tickLower === widestWidth);
+    if (widest) {
+      expect(widest.score).toBeLessThan(SCORE_SCALE / 1_000_000n);
+    }
   });
 });

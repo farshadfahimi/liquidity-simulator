@@ -59,7 +59,7 @@ const LN2_AT_SCALE = 693147180559945309n;
  * Accuracy is ~1e-4 relative for `y ∈ [-0.5, 1.0)` with 6 terms,
  * which is sufficient for vol estimation at 1e18 scale.
  */
-function bigintLn(value: bigint, decimals: number): bigint {
+export function bigintLn(value: bigint, decimals: number): bigint {
   if (value <= 0n) {
     throw new Error(`bigintLn requires a positive input, got ${value}`);
   }

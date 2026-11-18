@@ -4,7 +4,7 @@ import {
   CAPITAL_EFFICIENCY_SCALE,
   SECONDS_PER_YEAR,
   capitalEfficiencyRatio,
-  ilBetweenPrices,
+  ilAtRangeEdges,
 } from '../../math';
 import type { Pool } from '../pool';
 import { Position } from '../position';
@@ -61,8 +61,9 @@ export interface IRecommendInput {
   readonly feeRatePerSecond?: bigint;
 
   /**
-   * Override the entry price (defaults to `pool.currentPrice(18)`).
-   * Use this if the user is entering against a stale view.
+   * @deprecated No longer used: the IL term is the stress IL at the
+   * range edge, which needs no entry price. Kept so existing callers
+   * keep compiling.
    */
   readonly entryPrice?: Price;
 }
@@ -129,8 +130,6 @@ export class RecommendationEngine {
       );
     }
 
-    const entryPrice = input.entryPrice ?? input.pool.currentPrice(18);
-
     const feeRatePerSecond = input.feeRatePerSecond ?? this.deriveFeeRatePerSecond(input);
 
     const raw: Recommendation[] = [];
@@ -150,15 +149,12 @@ export class RecommendationEngine {
       );
 
       // Common metrics computed once per candidate.
-      const ce = capitalEfficiencyRatio(range.tickLower, range.tickUpper);
+      const ce = capitalEfficiencyRatio(range.tickLower, range.tickUpper, input.pool.state.tick);
       const sideInfo = this.sideOf(input.pool.state.tick, position.range);
-      const ilAtCurrentPrice = ilBetweenPrices(
-        input.pool.currentPrice(entryPrice.decimals).value,
-        entryPrice.decimals,
-        entryPrice.value,
-        entryPrice.decimals,
-        18,
-      );
+      // Stress IL at the worse range edge. (The previous "IL at current
+      // vs entry price" was 0 for every candidate because entry defaults
+      // to the current price, so it carried no information.)
+      const ilAtCurrentPrice = ilAtRangeEdges(range.tickLower, range.tickUpper, input.pool.state.tick);
 
       for (const strategy of input.strategies) {
         const rawScore = strategy.score(input.pool, position);

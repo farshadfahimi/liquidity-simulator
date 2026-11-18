@@ -10,6 +10,7 @@
  *   - {@link il}           — impermanent loss
  *   - {@link capital_efficiency} — CL capital-efficiency ratios
  *   - {@link volatility}   — realized (log-return) volatility
+ *   - {@link tick_volatility} — volatility in tick space (range widths)
  *   - {@link apr}          — APR from observed fees / principal
  *   - {@link scoring}      — Sharpe-like composite score
  */
@@ -26,11 +27,16 @@ export {
   bigintSqrtFloor,
   ilFromPriceRatio,
   ilBetweenPrices,
+  ilAtRangeEdges,
 } from './il.util';
 
 export {
   CAPITAL_EFFICIENCY_SCALE,
+  CE_FACTOR_SCALE,
+  CE_FACTOR_CEILING,
   capitalEfficiencyRatio,
+  capitalEfficiencyFactor,
+  priceBandRatio,
   capitalEfficiencyVsFullRange,
 } from './capital_efficiency.util';
 
@@ -41,6 +47,15 @@ export {
   realizedVolatilityFromPrices,
 } from './volatility.util';
 export type { IPriceObservation, IVolatilityResult } from './volatility.util';
+
+export {
+  LN_TICK,
+  tickVariancePerSecond,
+  blendedSigmaTicksPerSecond,
+  dailySigmaTicksFromSigmaPerSecond,
+  dailySigmaTicksFromAnnualVol,
+} from './tick_volatility.util';
+export type { ITickSample } from './tick_volatility.util';
 
 export {
   APR_SCALE,

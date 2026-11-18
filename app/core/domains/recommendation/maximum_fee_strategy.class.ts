@@ -2,9 +2,10 @@
 
 import {
   APR_SCALE,
-  CAPITAL_EFFICIENCY_SCALE,
+  CE_FACTOR_CEILING,
   SCORE_SCALE,
   bigintSqrtFloor,
+  capitalEfficiencyFactor,
   capitalEfficiencyRatio,
 } from '../../math';
 import type { Pool } from '../pool';
@@ -20,7 +21,7 @@ import type { IRecommendationStrategy } from '../strategy';
  *
  * Strategy: a tighter range (higher CE) earns more fees per unit of
  * liquidity, so the strategy rewards APR directly *and* rewards
- * higher CE (capped at `MAX_CE`). The composite is:
+ * higher CE (log-scaled, capped at `MAX_CE`). The composite is:
  *
  *     score = (aprFactor × ceFactor)^0.5
  *
@@ -51,8 +52,8 @@ export class MaximumFeeStrategy implements IRecommendationStrategy {
   /** APR factor saturates at 200%/year (a "very aggressive" target). */
   static readonly APR_FACTOR_CAP = 2n * APR_SCALE;
 
-  /** CE factor saturates at 5× V2-equivalent (typical CL upper bound). */
-  static readonly MAX_CE = 5n * CAPITAL_EFFICIENCY_SCALE;
+  /** CE factor saturates at 100× (≈ a ±1% range). */
+  static readonly MAX_CE = CE_FACTOR_CEILING;
 
   constructor(options: IMaximumFeeStrategyOptions) {
     if (options.expectedApr < 0n) {
@@ -64,12 +65,12 @@ export class MaximumFeeStrategy implements IRecommendationStrategy {
     this.expectedApr = options.expectedApr;
   }
 
-  score(_pool: Pool, position: Position): bigint {
-    const ce = capitalEfficiencyRatio(position.range.tickLower, position.range.tickUpper);
-
-    if (ce <= 0n) {
-      return 0n;
-    }
+  score(pool: Pool, position: Position): bigint {
+    const ce = capitalEfficiencyRatio(
+      position.range.tickLower,
+      position.range.tickUpper,
+      pool.state.tick,
+    );
 
     // APR factor.
     const aprFactor = this.expectedApr >= MaximumFeeStrategy.APR_FACTOR_CAP
@@ -80,10 +81,12 @@ export class MaximumFeeStrategy implements IRecommendationStrategy {
       return 0n;
     }
 
-    // CE factor.
-    const ceFactor = ce >= MaximumFeeStrategy.MAX_CE
-      ? SCORE_SCALE
-      : (ce * SCORE_SCALE) / MaximumFeeStrategy.MAX_CE;
+    // CE factor: log-normalised; 0 for a (near) full-range span.
+    const ceFactor = capitalEfficiencyFactor(ce, MaximumFeeStrategy.MAX_CE);
+
+    if (ceFactor === 0n) {
+      return 0n;
+    }
 
     // Geometric mean of two SCORE_SCALE-precision factors. The
     // product is at SCORE_SCALE² precision; bigintSqrtFloor pulls
