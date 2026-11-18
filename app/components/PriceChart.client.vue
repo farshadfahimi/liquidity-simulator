@@ -41,6 +41,7 @@ import {
   createChart,
   LineStyle,
   AreaSeries,
+  CandlestickSeries,
   createSeriesMarkers,
 } from 'lightweight-charts';
 import type {
@@ -114,7 +115,7 @@ const badge = computed(() => buildPriceBadge({
   token0Symbol: props.token0Symbol,
 }));
 
-const lw = { createChart, LineStyle, AreaSeries, createSeriesMarkers };
+const lw = { createChart, LineStyle, AreaSeries, CandlestickSeries, createSeriesMarkers };
 
 onMounted(() => {
   if (!containerRef.value) return;
@@ -261,6 +262,9 @@ onBeforeUnmount(() => {
       </div>
       <div v-if="badge.lastTime" class="mt-1 text-[10px] text-slate-400">
         {{ badge.lastTime }}
+      </div>
+      <div v-if="badge.strategyLabel" class="mt-1 text-[10px] text-sky-300">
+        strategy: {{ badge.strategyLabel }}
       </div>
       <div
         v-if="badge.rangeLabel"

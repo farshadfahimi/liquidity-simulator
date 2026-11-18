@@ -104,6 +104,7 @@ function createMockLw(): {
   return {
     module: {
       AreaSeries: { __kind: 'AreaSeries' },
+      CandlestickSeries: { __kind: 'CandlestickSeries' },
       LineStyle: { Solid: 'solid', Dashed: 'dashed' },
       createChart,
       createSeriesMarkers,
