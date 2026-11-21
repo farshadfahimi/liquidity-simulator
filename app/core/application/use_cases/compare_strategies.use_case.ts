@@ -22,6 +22,8 @@ import type { Pool } from '../../domains/pool';
 import { InvalidUseCaseInputError } from '../errors/invalid_input_error';
 import type { IRecommendationDTO } from '../dtos/recommendation.dto';
 import type { IPoolHistoryDTO } from '../dtos/pool_history.dto';
+import type { TPoolLiquidity } from '../../shared/types';
+import { impliedFeeApr } from './implied_fee_apr.util';
 
 /**
  * Input for {@link CompareStrategiesUseCase}.
@@ -63,6 +65,19 @@ import type { IPoolHistoryDTO } from '../dtos/pool_history.dto';
  *
  * `scoringConfig` lets callers tweak per-strategy weights + global
  * knobs. When omitted, the use case uses {@link defaultScoringConfig}.
+ *
+ * `liquidity` is an optional liquidity snapshot (TVL roadmap slice 4).
+ * When supplied, the pool's own fee APR is derived from its 24h
+ * turnover (`APR = volume/TVL × feeRate × 365`) and used instead of
+ * the flat 30% prior. The engine then makes the APR *range-specific*
+ * per candidate:
+ *
+ *     expectedApr = poolFeeApr × capitalEfficiency × P(in range)
+ *
+ * When `liquidity` is omitted — or the implied APR is not credible
+ * (no volume, no TVL, or an outlier > 10,000%/yr) — the use case
+ * falls back to the 30% prior and the output is byte-identical to
+ * the pre-slice-4 behaviour.
  */
 export interface ICompareStrategiesInput {
   readonly pool: Pool;
@@ -88,6 +103,13 @@ export interface ICompareStrategiesInput {
   readonly horizonDays?: number;
 
   readonly kValues?: readonly number[];
+
+  /**
+   * Optional liquidity snapshot (TVL roadmap slice 4). When
+   * supplied, the pool's own fee APR replaces the flat 30% prior and
+   * the engine computes a range-specific expected APR per candidate.
+   */
+  readonly liquidity?: TPoolLiquidity;
 }
 
 /** Default σ-multipliers: ≈ 68% / 90% / 95% / 99% end-of-horizon coverage. */
@@ -131,7 +153,23 @@ export class CompareStrategiesUseCase {
 
     const entryPrice = input.pool.currentPrice(18);
 
-    const expectedApr = input.expectedApr ?? 3n * 10n ** 17n; // 30%
+    // TVL roadmap slice 4 — the pool's own fee APR, implied by the
+    // snapshot's 24h turnover:
+    //
+    //     APR = (volume24hUsd / tvlUsd) × feeRate × 365
+    //
+    // `impliedFeeApr` returns `0n` when the turnover is unknown or
+    // when the implied APR is an outlier (> 10,000%/yr) — in both
+    // cases we keep the flat 30% prior.
+    const poolFeeApr = input.liquidity
+      ? impliedFeeApr(
+          input.pool.state.fee,
+          input.liquidity.volume24hUsd,
+          input.liquidity.tvlUsd,
+        )
+      : 0n;
+
+    const expectedApr = input.expectedApr ?? (poolFeeApr > 0n ? poolFeeApr : 3n * 10n ** 17n); // 30%
     const riskFreeApr = input.riskFreeApr ?? 0n;
     const horizonDays = input.horizonDays ?? DEFAULT_HORIZON_DAYS;
     const kValues = input.kValues ?? DEFAULT_K_VALUES;
@@ -158,8 +196,17 @@ export class CompareStrategiesUseCase {
       ?? historyVol
       ?? 5n * 10n ** 17n; // 50% prior
 
-    const generator = input.generator
-      ?? this.buildGenerator(input, onChainHistory, annualizedVolatility, horizonDays, kValues);
+    // The generator's σ (daily, in tick units) is also what the engine
+    // needs to recover each candidate's z-score `k`. When the caller
+    // brings their own generator we still resolve σ — but guarded, so
+    // a malformed volatility can never break a custom generator — and
+    // it is only used for the pool-aware context.
+    const { generator, dailySigmaTicks } = input.generator
+      ? {
+          generator: input.generator,
+          dailySigmaTicks: this.tryDailySigmaTicks(onChainHistory, annualizedVolatility),
+        }
+      : this.buildGenerator(input, onChainHistory, annualizedVolatility, horizonDays, kValues);
 
     const strategies = input.strategies ?? [
       new BalancedStrategy({
@@ -189,6 +236,13 @@ export class CompareStrategiesUseCase {
       generator,
       strategies,
       scoringConfig,
+      // TVL roadmap slice 4 — the pool-aware context. Without a
+      // liquidity snapshot (or without a credible pool fee APR) the
+      // engine keeps the "prior" path and the output is unchanged.
+      ...(input.liquidity !== undefined ? { liquidity: input.liquidity } : {}),
+      ...(poolFeeApr > 0n ? { poolFeeApr } : {}),
+      ...(dailySigmaTicks !== null ? { dailySigmaTicks } : {}),
+      horizonDays,
     });
 
     return toRecommendationDTO(set, input.protocolId ?? '');
@@ -197,6 +251,9 @@ export class CompareStrategiesUseCase {
   /**
    * Pick the default range generator (see {@link ICompareStrategiesInput}).
    * Half-width for each `k` is `k · σ_daily · √horizonDays` ticks.
+   *
+   * Also returns the σ it used — the engine needs the very same
+   * number to recover each candidate's z-score `k` (slice 4).
    */
   private buildGenerator(
     input: ICompareStrategiesInput,
@@ -204,11 +261,36 @@ export class CompareStrategiesUseCase {
     annualizedVolatility: bigint,
     horizonDays: number,
     kValues: readonly number[],
-  ): IRangeGenerator {
+  ): { generator: IRangeGenerator; dailySigmaTicks: number | null } {
     if (input.widthsTicks) {
-      return new ConstantRangeGenerator({ widthsTicks: input.widthsTicks });
+      return {
+        generator: new ConstantRangeGenerator({ widthsTicks: input.widthsTicks }),
+        // A fixed width list doesn't need σ to size its ranges, but
+        // the engine still wants it for the pool-aware context — so
+        // resolve it in guarded mode.
+        dailySigmaTicks: this.tryDailySigmaTicks(history, annualizedVolatility),
+      };
     }
 
+    const dailySigmaTicks = this.computeDailySigmaTicks(history, annualizedVolatility);
+
+    return {
+      generator: new VolatilityAdjustedRangeGenerator({
+        dailySigmaTicks,
+        sigmaMultipliers: kValues.map((k) => k * Math.sqrt(horizonDays)),
+      }),
+      dailySigmaTicks,
+    };
+  }
+
+  /**
+   * Daily σ in *tick* units — measured from the on-chain history when
+   * it is usable, otherwise from the annualized-volatility prior.
+   */
+  private computeDailySigmaTicks(
+    history: IPoolHistoryDTO | null,
+    annualizedVolatility: bigint,
+  ): number {
     let dailySigmaTicks: number | null = null;
 
     if (history) {
@@ -227,12 +309,25 @@ export class CompareStrategiesUseCase {
     }
 
     // Flat history / zero vol: keep a strictly positive σ so candidates exist.
-    dailySigmaTicks = Math.max(dailySigmaTicks, 1e-6);
+    return Math.max(dailySigmaTicks, 1e-6);
+  }
 
-    return new VolatilityAdjustedRangeGenerator({
-      dailySigmaTicks,
-      sigmaMultipliers: kValues.map((k) => k * Math.sqrt(horizonDays)),
-    });
+  /**
+   * Same as {@link CompareStrategiesUseCase.computeDailySigmaTicks},
+   * but never throws — used when the caller supplied their own range
+   * generator, where a broken volatility must not break the run.
+   * `null` means "σ unknown" → the engine keeps the prior path.
+   */
+  private tryDailySigmaTicks(
+    history: IPoolHistoryDTO | null,
+    annualizedVolatility: bigint,
+  ): number | null {
+    try {
+      return this.computeDailySigmaTicks(history, annualizedVolatility);
+    }
+    catch {
+      return null;
+    }
   }
 }
 

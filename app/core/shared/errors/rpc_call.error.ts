@@ -3,7 +3,7 @@
 export class RpcCallError extends Error {
   constructor(
     public readonly method: string,
-    public readonly cause: unknown,
+    public override readonly cause: unknown,
   ) {
     super(`RPC call "${method}" failed: ${String(cause)}`);
 

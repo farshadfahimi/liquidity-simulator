@@ -1,3 +1,3 @@
 // app/core/domains/strategy/index.ts
 
-export type { IRecommendationStrategy } from './strategy.interface';
+export type { IRecommendationStrategy, IStrategyContext } from './strategy.interface';

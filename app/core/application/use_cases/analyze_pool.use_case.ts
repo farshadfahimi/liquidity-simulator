@@ -1,6 +1,6 @@
 // app/core/application/use_cases/analyze_pool.use_case.ts
 
-import type { TAddress } from '../../shared/types';
+import type { TAddress, TPoolLiquidity } from '../../shared/types';
 import { Pool } from '../../domains/pool';
 import type { PoolHistory } from '../../domains/history';
 import { AnalyticsEngine } from '../../domains/analytics';
@@ -8,6 +8,7 @@ import { InvalidUseCaseInputError } from '../errors/invalid_input_error';
 import type { IPoolAnalysisDTO, ITokenSummaryDTO } from '../dtos/pool_analysis.dto';
 import type { IProtocolAdapter } from '../../adapters/protocol_adapter.interface';
 import type { TAdapterResolver } from './adapter_resolver.type';
+import { impliedFeeApr } from './implied_fee_apr.util';
 
 /**
  * Input for {@link AnalyzePoolUseCase}.
@@ -19,6 +20,12 @@ import type { TAdapterResolver } from './adapter_resolver.type';
  *
  * `priceDecimals` controls the precision of `currentPrice` in the
  * returned DTO (default 18).
+ *
+ * `liquidity` is optional. When supplied, the market view of the
+ * pool (TVL, 24h volume, implied fee APR, provenance) is echoed
+ * onto the DTO — see the liquidity block in
+ * {@link IPoolAnalysisDTO}. When omitted, those fields are simply
+ * absent from the DTO.
  */
 export interface IAnalyzePoolInput {
   readonly pool: TAddress;
@@ -30,6 +37,13 @@ export interface IAnalyzePoolInput {
   readonly history?: PoolHistory;
 
   readonly priceDecimals?: number;
+
+  /**
+   * A market-data liquidity snapshot for this pool (from an
+   * `IMarketDataProvider`). Optional — the analysis never *needs*
+   * it, it only enriches the DTO.
+   */
+  readonly liquidity?: TPoolLiquidity;
 }
 
 /**
@@ -99,6 +113,12 @@ export class AnalyzePoolUseCase {
       decimals: state.token1.decimals,
     };
 
+    // The optional liquidity block — present only when the caller
+    // supplied a market-data snapshot. The fee APR is derived from
+    // the snapshot's turnover and the pool's own fee tier, and is
+    // clamped by the shared outlier guard.
+    const liquidity = input.liquidity;
+
     return {
       pool: input.pool,
       chainId: input.chainId,
@@ -116,6 +136,15 @@ export class AnalyzePoolUseCase {
       returnDecimals: 18,
       snapshotCount,
       historyWindowSeconds,
+      ...(liquidity
+        ? {
+            tvlUsd: liquidity.tvlUsd,
+            volume24hUsd: liquidity.volume24hUsd,
+            feeApr: impliedFeeApr(state.fee, liquidity.volume24hUsd, liquidity.tvlUsd),
+            tvlSource: liquidity.source,
+            tvlTimestamp: liquidity.timestamp,
+          }
+        : {}),
     };
   }
 }

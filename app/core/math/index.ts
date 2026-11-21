@@ -13,6 +13,8 @@
  *   - {@link tick_volatility} — volatility in tick space (range widths)
  *   - {@link apr}          — APR from observed fees / principal
  *   - {@link scoring}      — Sharpe-like composite score
+ *   - {@link virtual_reserves} — on-chain TVL baseline (virtual reserves)
+ *   - {@link fee_apr}      — pool fee APR from 24h turnover
  */
 
 export {
@@ -69,6 +71,24 @@ export {
   sharpeLikeScore,
   sharpeFromWindow,
 } from './scoring.util';
+
+export {
+  virtualReserves,
+  virtualReservesInUsd,
+} from './virtual_reserves.util';
+export type { TVirtualReserves } from './virtual_reserves.util';
+
+export {
+  DAYS_PER_YEAR,
+  annualizeDailyRate,
+  feeAprFromTurnover,
+} from './fee_apr.util';
+
+export {
+  NORMAL_CDF_SCALE,
+  normalCdf,
+  twoSidedCoverage,
+} from './normal_cdf.util';
 
 export {
   bigintExp,

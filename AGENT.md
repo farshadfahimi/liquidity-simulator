@@ -418,10 +418,16 @@ and the tick reader. Callers don't need to know about
 result so callers can see the effective range.
 
 ### 5.6 Providers answer "where did the data come from?"
-Two providers exist today:
+Three providers exist today:
 - `RpcProvider` — wraps a viem `PublicClient`. The only place that knows
   about viem.
 - `RpcHistoryProvider` — composes `IRpcProvider` to replay blocks/logs.
+- `DefiLlamaMarketDataProvider` — answers the *market* questions
+  ("what is this token worth?", "how much TVL does this pool hold?")
+  from DefiLlama's public HTTP API. No viem, no SDK — just `fetch`.
+
+A provider never throws for "data unavailable": it returns `null` /
+`[]` and the caller falls back to the next tier (see §6.20).
 
 A future `DefiLlamaHistoryProvider` or `SubgraphProvider` would implement
 the same `IHistoryProvider` / `IRpcProvider` interface.
@@ -518,6 +524,26 @@ with a leading path comment, and snake_case the filename.
   `replayBlocks`, `replayLogs`, `getBlock`, `getLatestBlockNumber`.
 - `rpc_history_provider.class.ts` → `RpcHistoryProvider` — implementation.
 - `create_history_provider.factory.ts` → `createHistoryProvider(rpc)` — factory.
+
+### 6.3a `app/core/providers/market/`
+The **third** provider kind: external market data (USD prices, TVL,
+volume) as opposed to chain data. HTTP-only — no viem, no SDK, and
+**no cross-provider imports** (§3).
+
+- `market_data_provider.interface.ts` → `IMarketDataProvider` —
+  `getTokenPrices`, `getPoolLiquidity`, `getPoolTvlHistory`.
+- `defi_llama_map.const.ts` → `DEFI_LLAMA_CHAINS`,
+  `DEFI_LLAMA_PROJECTS`, `defiLlamaChain()`, `defiLlamaProject()`.
+- `defi_llama_market_data_provider.class.ts` →
+  `DefiLlamaMarketDataProvider` + `parseDefiLlamaFee()` — the E1/E2/E3
+  implementation and the natural-key match.
+- `create_market_data_provider.factory.ts` →
+  `createMarketDataProvider({ fetchImpl?, now? })` — factory.
+- `index.ts` — barrel.
+
+Contract: **providers never throw for "data unavailable"** — they
+return `null` / `[]` and the caller falls back to the next tier.
+Throwing is reserved for programming errors. See §6.20.
 
 ### 6.4 `app/core/network/`
 - `TNetwork` definition in `shared/types/network.type.ts`.
@@ -2120,6 +2146,576 @@ action.
   0.3% on Ethereum mainnet) and the synthetic fallback path.
   Confirms `getPoolStateAtBlock` returns a non-zero tick at a
   historical block.
+
+### 6.19 TVL roadmap — slice 1: on-chain TVL baseline (done)
+
+The TVL roadmap (`TVL-ROADMAP.md` at the repo root) adds TVL, volume
+and USD prices to the app. **Slice 1** is the offline tier: the
+on-chain TVL baseline, computable with **zero external API calls**.
+
+New modules:
+
+- `app/core/shared/utils/usd.util.ts` → `USD_DECIMALS = 6`,
+  `toUsdBigint(number)`, `formatUsd(bigint, fractionDigits = 2)`.
+  Unit convention: every USD **amount** that crosses a Core boundary
+  is a `bigint` at 6 decimals (`1_000_000n` == `$1.00`); token USD
+  **prices** stay at 1e18 (they multiply raw token amounts). Six
+  decimals is the smallest scale where `Math.round(v * 1e6)`
+  reproduces a DefiLlama JSON float exactly, and it matches USDC's
+  own on-chain decimals.
+- `app/core/math/virtual_reserves.util.ts` → `TVirtualReserves`,
+  `virtualReserves(liquidity, sqrtPriceX96)` and
+  `virtualReservesInUsd(liquidity, sqrtPriceX96, token0Decimals,
+  token1Decimals, token0Usd, token1Usd)`. Pure math (no I/O, no viem).
+  The virtual-reserve convention treats the liquidity active at the
+  current tick as a single full-range position:
+  `amount0 = L × 2^96 / sqrtPriceX96`, `amount1 = L × sqrtPriceX96 / 2^96`.
+  This is the same convention DefiLlama uses for V3 pools, so the
+  on-chain estimate and the external index are directly comparable.
+
+Domain additions:
+
+- `app/core/domains/pool/pool.class.ts` gains `virtualReserves()`
+  (delegates to the math util) and `tvlToken0(decimals = 18)` — the
+  pool value denominated in token0 units, returned as a `Price`.
+- `app/core/domains/analytics/analytics_engine.class.ts` gains
+  `poolTvlOnChain(pool, token0Usd, token1Usd)` (USD at 6 decimals, from
+  caller-supplied 1e18 prices) and `positionShareOfPool(notionalUsd,
+  tvlUsd)` (the exit-impact guard, at `SCORE_SCALE`).
+
+Adapter fix (required by the roadmap before slice 1):
+
+- `app/core/adapters/uniswap/v3/pools/pool_state_reader.class.ts` and
+  `app/core/adapters/shadow/pools/pool_state_reader.class.ts`:
+  `readStateAtBlock` now multicalls `liquidity()` **at the pinned
+  block** alongside `slot0()` (same `blockTag`), and the matching
+  `getPoolStateAtBlock` in both adapters returns that historical
+  liquidity instead of `0n`. Live TVL was never affected; this is what
+  makes an on-chain TVL *history* possible in slice 5.
+
+Caveat (deliberate, documented): the virtual reserves only account for
+the liquidity **active at the current tick**. Liquidity parked outside
+the tick is invisible, so wide-range-heavy pools are understated. Any
+UI that shows this number must label it as an estimate
+(`on-chain-estimates`), never as a fact, and must never mix the tiers
+in a single formula.
+
+Tests (all network-free):
+
+- `app/core/test/_fixtures/pool_state_fixture.ts` — synthetic
+  `TPoolState` builder (USDC 6d / WETH 18d at tick 0, i.e. a 1:1 raw
+  ratio) so every expected value is hand-computable. Its
+  `IStubStateToken` carries **`name`** because `TPoolState.token0/1`
+  are `TToken`, which requires it.
+- `app/core/test/math/virtual_reserves.test.ts` — 10 cases.
+- `app/core/test/domains/pool/virtual_reserves.test.ts` — 8 cases.
+- `app/core/test/math/math-engine.test.ts` — gained a
+  `virtualReservesInUsd` cross-check against a hand-computed value.
+
+Also fixed in passing: the Phase 4 test
+`capital efficiency is higher for narrower ranges` asserted the
+**price-band-ratio** ordering (`CE[w=100] < CE[w=500] < CE[w=2000]`),
+a leftover from before `capitalEfficiencyRatio` was corrected to the
+true capital-efficiency formula. True CE **grows as the range
+narrows**, so the assertion is now inverted.
+
+Verification:
+
+- `pnpm typecheck` ✓ (a no-op — see the note in §6.20)
+- `pnpm exec nuxt prepare` ✓
+- `pnpm test` ✓ — 19 files / 203 tests
+
+### 6.20 TVL roadmap — slice 2: DefiLlama market-data provider (done)
+
+The second TVL slice: the **external** tier of the fallback chain —
+USD token prices (E1), the per-pool TVL/volume index (E2) and the
+per-pool TVL history (E3), all from DefiLlama's public API (no key,
+CORS-open, browser-callable).
+
+New modules:
+
+- `app/core/shared/types/token_price.type.ts` → `TTokenPrice` —
+  `{ token, usdPrice (1e18), confidence (1e18), timestamp }`.
+- `app/core/shared/types/pool_liquidity.type.ts` → `TPoolLiquidity`
+  and `TPoolLiquiditySource` (`defi-llama` | `on-chain-estimates`).
+- `app/core/shared/types/pool_tvl_point.type.ts` → `TPoolTvlPoint`.
+- `app/core/shared/utils/scale.util.ts` → `toScaledBigint(value, decimals)`
+  — **exact** float → scaled bigint. It parses the decimal expansion
+  produced by `toFixed` digit by digit, *not*
+  `BigInt(Math.round(v * 10 ** d))`: the naive form silently loses the
+  low digits above 2^53, which at the 1e18 price scale means every
+  price above ~$9.
+- `app/core/shared/utils/usd.util.ts` (extended) → `USD_PRICE_DECIMALS = 18`
+  and `toUsdPriceBigint(value)`.
+- `app/core/providers/market/market_data_provider.interface.ts` →
+  `IMarketDataProvider` — `getTokenPrices`, `getPoolLiquidity`,
+  `getPoolTvlHistory`.
+- `app/core/providers/market/defi_llama_map.const.ts` →
+  `DEFI_LLAMA_CHAINS`, `DEFI_LLAMA_PROJECTS`, `defiLlamaChain()`,
+  `defiLlamaProject()`.
+- `app/core/providers/market/defi_llama_market_data_provider.class.ts` →
+  `DefiLlamaMarketDataProvider` + `parseDefiLlamaFee()`.
+- `app/core/providers/market/create_market_data_provider.factory.ts` →
+  `createMarketDataProvider({ fetchImpl?, now? })`.
+- `app/core/providers/market/index.ts` — barrel.
+
+Three facts drive the implementation (all verified live, roadmap §3):
+
+1. **E2 cannot be filtered server-side** — query parameters are ignored
+   and the full index is ~10.4 MB / 15,290 pools. It is therefore
+   fetched **lazily** (never on boot), filtered client-side down to
+   the projects we support, cached for **1 h**, and a single in-flight
+   promise is shared by all callers.
+2. **E2 pool ids are UUIDs**, never addresses. A pool is matched by its
+   natural key — `(project, chain, token pair, fee tier)` — with the
+   tokens lower-cased and sorted (the order DefiLlama lists them in
+   doesn't matter). The *project* is part of the key because two
+   projects can list the same pair with the same fee (a V2 and a V3
+   pool, say). `poolMeta` is parsed by its **digits**
+   (`"0.3%" → 3000`, `"CL 0.24%" → 2400`), never by string comparison.
+3. **The payload is JSON**, i.e. JS floats. Every number is converted
+   to a bigint **at the provider boundary**: USD amounts at
+   `USD_DECIMALS` (6), token prices and confidence at 1e18.
+
+Caching:
+
+| Call | Cache | TTL |
+|---|---|---|
+| E1 prices | memory, per token batch | 60 s |
+| E2 index | memory, one shared map | 1 h |
+| E3 history | memory, per pool UUID | 10 min |
+
+Degradation: a provider **never throws** for "data unavailable" — a
+network error, a non-2xx response or an unparseable body yields
+`null` / `[]`, and the caller falls back to the next tier (the
+on-chain virtual reserves of slice 1). Throwing is reserved for
+programming errors.
+
+Known gap (deliberate, for slice 3+): the E2 index is cached **in
+memory only**. The roadmap also suggests persisting it in IndexedDB
+(10 MB > the localStorage quota); that wrapper is not written yet, so
+a page reload re-downloads the index. The seam is `getPoolIndex()`.
+
+Tests (all network-free — `fetchImpl` is stubbed):
+
+- `app/core/test/_fixtures/defi_llama_fixture.ts` — the verified E1/E2/E3
+  sample payloads.
+- `app/core/test/_fixtures/stub_market_data_provider.ts` — an
+  `IMarketDataProvider` stub for the slice-3 use-case tests.
+- `app/core/test/providers/market/defi_llama_market_data_provider.test.ts`
+  — 28 cases: exact float→bigint conversion, the natural-key match, the
+  Shadow `CL ` prefix, unknown chain / pair / protocol, the caching
+  rules, and every degradation path.
+
+Verification:
+
+- `pnpm typecheck` ✓ — but note: the root `tsconfig.json` has `files: []`
+  plus project references, so `tsc -p tsconfig.json` type-checks
+  **zero** files; the command is a **no-op** that always exits 0. A
+  real check is `pnpm exec tsc --noEmit -p .nuxt/tsconfig.app.json`
+  (run `pnpm exec nuxt prepare` first).
+- The repo currently carries **56 pre-existing semantic type errors**
+  (e.g. `app/core/index.ts` re-exporting a non-existent `./providers`
+  barrel, `rpc_provider.class.ts` viem-abi mismatches,
+  `pool_position_quoter.class.ts` missing `useFullPrecision`,
+  `TToken` missing `name` in several test fixtures). They are
+  **not** in any TVL file — verify with
+  `grep "error TS" | sed 's/(.*//' | sort -u` against your own
+  changed files before blaming a slice.
+- `pnpm exec nuxt prepare` ✓
+- `pnpm test` ✓ — 20 files / 231 tests
+
+Also fixed in passing (both pre-existing, both blocking a real
+typecheck):
+
+- `app/core/shared/types/token_source.type.ts` — the JSDoc contained
+  `app/core/adapters/**/sources/`, and the `*/` **terminated the
+  comment**, so every TS parser choked on the rest of the file.
+- `app/core/shared/errors/rpc_call.error.ts` — `cause` overrides
+  `Error.cause`, so it needs the `override` modifier
+  (`noImplicitOverride` is on).
+
+⚠ **Gotcha worth remembering:** `tsc` reports *syntactic* diagnostics
+first and **skips all semantic diagnostics** when the program has a
+syntax error. Before the `token_source.type.ts` fix the whole repo
+showed only **21** errors (all syntactic, one file); afterwards the
+**same** code base showed **56** — the 35 extra were pre-existing
+semantic errors that had simply been *masked*. Don't read a low error
+count as "the repo is healthy".
+
+### 6.21 TVL roadmap — slice 3: application layer + UI (done)
+
+The third slice: the **application** tier — one use case that owns the
+whole fallback chain, a UI-ready DTO, and the first TVL surface in the
+Nuxt app.
+
+New modules:
+
+- `app/core/application/dtos/pool_tvl.dto.ts` → `IPoolTvlDTO` — the
+  UI-ready summary (TVL, 24 h volume, implied APR, deposit share,
+  virtual reserves, source badge, timestamp).
+- `app/core/application/use_cases/get_pool_tvl.use_case.ts` →
+  `GetPoolTvlUseCase` + `IGetPoolTvlInput` — owns the fallback chain.
+- `app/core/application/use_cases/implied_fee_apr.util.ts` →
+  `impliedFeeApr()`, `FEE_RATE_DIVISOR`, `MAX_REASONABLE_FEE_APR` — the
+  **single** home for the fee-rate conversion and the outlier clamp,
+  shared by `GetPoolTvlUseCase` and `AnalyzePoolUseCase` so they cannot
+  drift apart.
+- `app/core/math/fee_apr.util.ts` → `feeAprFromTurnover()`,
+  `annualizeDailyRate()`, `DAYS_PER_YEAR`.
+- `app/core/shared/value_objects/pool_liquidity.value-object.ts` →
+  `PoolLiquidityVO` (validation + `isStale()`).
+- `app/core/shared/utils/stablecoin.util.ts` → `isStablecoinSymbol()` —
+  a **conservative** symbol heuristic for the stablecoin-anchor tier.
+- `app/composables/usePoolTvl.ts` → thin reactive glue (`tvl`,
+  `isLoadingTvl`, `lastError`, `loadTvl`, `resetTvl`).
+- `app/core/test/application/use_cases/get_pool_tvl.test.ts` — 20
+  network-free cases.
+
+Changed files:
+
+- `app/core/application/use_cases/analyze_pool.use_case.ts` — accepts an
+  optional `liquidity?: TPoolLiquidity` and echoes `tvlUsd`,
+  `volume24hUsd`, `feeApr`, `tvlSource`, `tvlTimestamp` onto the DTO
+  (all optional, absent when no snapshot is supplied).
+- `app/core/application/dtos/pool_analysis.dto.ts` — the same optional
+  fields.
+- `app/core/services/core_services.class.ts` — holds
+  `market: IMarketDataProvider` (default: the DefiLlama provider) and
+  exposes `getPoolTvl` through `ICoreUseCases`.
+- `app/core/services/create_core_services.factory.ts` — a `market?`
+  option, forwarded to `CoreServices`.
+- `app/plugins/core.client.ts` — injects **one** `createMarketDataProvider()`
+  instance, so every use-case bundle shares the provider's caches (no
+  duplicate 10 MB index download, no circular import).
+- `app/components/PoolDetailsTab.vue` — the *Liquidity & TVL* card.
+- `app/pages/pool/[pool].vue` — loads TVL in parallel with the analysis
+  (`await Promise.all([loadAnalysis(), loadPoolTvl()])`) and forwards the
+  TVL state as props.
+- `app/utils/formatDtos.ts` — re-exports `formatUsd` for auto-import.
+- `app/core/test/_fixtures/stub_protocol_adapter.ts` — the stub tokens
+  now carry `name` (`TToken` requires it).
+
+The fallback chain (roadmap §8), highest tier first:
+
+1. **DefiLlama indexed TVL** (E2) → `source: 'defi-llama'`.
+2. **Virtual reserves valued with both provider prices** →
+   `source: 'on-chain-estimates'`.
+3. **Virtual reserves valued with one provider price** (the other leg is
+   derived from the pool price ratio) **or a stablecoin anchor** →
+   `source: 'on-chain-estimates'`.
+4. **Virtual reserves in token units only** → `source: 'token-units'`.
+
+Sanity clamps:
+
+- Indexed TVL below `on-chain estimate ÷ 50` → the index is suspected
+  stale → prefer the on-chain number.
+- Fee APR above **10,000 %/yr** → clamp to `0n` and label it unreliable.
+
+⚠ **APR clamp scale.** `APR_SCALE` is 1e18 == **100 %**, so 10,000 %/yr
+is **100 ×** the scale unit: `MAX_REASONABLE_FEE_APR = 100n * APR_SCALE`.
+Writing `10_000n * APR_SCALE` means 1,000,000 %/yr — a real 100× bug that
+was caught by the boundary test ("clamps at exactly 10,000 %/yr, not at
+1,000,000 %/yr").
+
+⚠ **Pool price direction.** The pool price is **token1 per token0**, so
+pricing the token1 leg in token0 is a **division** by the price, not a
+multiplication.
+
+Virtual reserves remain an *estimate*: they approximate the active
+liquidity at the current tick as one full-range position, so they
+understate wide-range-heavy pools. The card labels that tier
+"estimate" and the token-units tier "token units" instead of pretending
+it is exact.
+
+Verification:
+
+- `pnpm exec nuxt prepare` ✓
+- `pnpm typecheck` ✓ — still a zero-file no-op (see §6.20).
+- `pnpm exec tsc --noEmit -p .nuxt/tsconfig.app.json` → **54** errors,
+  all in untouched pre-existing files; **zero** in any changed or new
+  TVL file.
+- `pnpm test` ✓ — 23 files / 271 tests.
+- The two changed `.vue` files compile cleanly with
+  `@vue/compiler-sfc` (there is no `vue-tsc` in this repo):
+  `ALL SFCs OK`.
+
+### 6.22 TVL roadmap — slice 4: pool-aware recommendations (done)
+
+The fourth slice: the **payoff**. Until now every recommendation used a
+flat hardcoded **30 % APR prior**. Now the engine can use the pool's
+*own* fee APR and make the APR **range-specific**:
+
+```
+expectedApr = poolFeeApr × capitalEfficiency × P(in range)
+```
+
+New modules:
+
+- `app/core/math/normal_cdf.util.ts` → `normalCdf()`,
+  `twoSidedCoverage()`, `NORMAL_CDF_SCALE` — the standard normal CDF as
+  a **fixed-point bigint** at 1e18 (the Core never lets a float carry
+  money).
+- `app/core/domains/strategy/strategy.interface.ts` → optional
+  `IStrategyContext` (third `score()` parameter) — **backward
+  compatible**: a strategy that ignores it keeps working.
+
+Changed files:
+
+- `app/core/domains/strategy/index.ts` — exports `IStrategyContext`.
+- `app/core/domains/recommendation/recommendation_engine.class.ts` —
+  `IRecommendInput` gains optional `liquidity`, `poolFeeApr`,
+  `dailySigmaTicks`, `horizonDays`; `buildStrategyContext()` computes
+  the per-candidate context; the recommendation's `expectedApr` now
+  comes from the context when there is one.
+- `app/core/domains/recommendation/balanced_strategy.class.ts`,
+  `maximum_fee_strategy.class.ts`, `highest_sharpe_strategy.class.ts` —
+  `const apr = context?.expectedApr ?? this.expectedApr;`
+- `app/core/domains/recommendation/index.ts` — barrel now exports
+  `IRecommendationStrategy` (the stale `IRecommendation` name is gone).
+- `app/core/domains/recommendation/scoring_config.value-object.ts` —
+  `IScoringConfigFields.weights` is now **optional** (omitting it = 1.0×
+  on every strategy, which is what `defaultScoringConfig` does).
+- `app/core/application/use_cases/compare_strategies.use_case.ts` —
+  accepts optional `liquidity?: TPoolLiquidity`; derives `poolFeeApr`
+  with `impliedFeeApr()`; resolves the daily σ in tick units and passes
+  it to the engine so the candidate z-scores can be recovered.
+- `app/core/application/dtos/pool_tvl.dto.ts` → `toPoolLiquidity()` —
+  converts an `IPoolTvlDTO` into the `TPoolLiquidity` the use case
+  expects.
+- `app/pages/pool/[pool].vue` — forwards the TVL snapshot into
+  `compareStrategies` (the TVL load already runs in parallel with the
+  analysis since slice 3).
+
+Tests:
+
+- `app/core/test/math/normal_cdf.test.ts` — **15** network-free cases
+  (`Φ(0) = 0.5`, `Φ(1) ≈ 0.8413447460685429`, the standard percentiles,
+  the far-tail asymptotic branch, symmetry, monotonicity, saturation,
+  and the `k = 1 / 1.65 / 2 / 2.5` coverage values).
+- `app/core/test/recommendation/recommendation.test.ts` — a new
+  `describe('TVL roadmap slice 4 — pool-aware recommendations')` block
+  with **6** cases: byte-identical no-liquidity regression, the flat
+  30 % prior, the razor-thin range losing to a wider covered range, the
+  exact `poolFeeApr × CE × P` identity, 10×-turnover differentiation,
+  and the implausible-turnover fallback.
+
+#### The formula, in detail
+
+`P(in range) = 2Φ(k) − 1` — the two-sided coverage of a `k`-σ band.
+The z-score `k` is **recovered from the candidate itself**:
+
+```
+k = halfWidth / (σ_dailyTicks · √horizonDays)
+```
+
+`halfWidth` is `(tickUpper − tickLower) / 2`. The engine therefore
+needs no generator changes: the `VolatilityAdjustedRangeGenerator` keeps
+its `k · √horizonDays` multipliers, and the engine re-derives `k` from
+the half-width that the generator produced.
+
+⚠ **Normalised CE, not raw CE.** `capitalEfficiencyRatio` is unbounded
+(≈ 40× at ±5 %), so multiplying the *raw* ratio into an APR would push
+the "expected APR" far outside any plausible range and saturate the
+strategies' APR factor — which would make the in-range probability
+irrelevant again. The engine multiplies the **normalised** factor
+`capitalEfficiencyFactor(ce, CE_FACTOR_CEILING)` (∈ `[0, 1]`,
+`ln(CE)/ln(ceiling)`) instead, so:
+
+- `expectedApr ≤ poolFeeApr` always, and
+- `P(in range)` stays meaningful in the mix.
+
+#### Degradation: the 30 % prior is preserved
+
+The context is built **only** when *all* of these hold:
+
+1. a liquidity snapshot is present,
+2. `poolFeeApr > 0n` (credible — `impliedFeeApr()` returns `0n` for an
+   unknown turnover or an outlier above 10,000 %/yr),
+3. `dailySigmaTicks` is a finite positive number, and
+4. `horizonDays` is a finite positive number.
+
+Otherwise `buildStrategyContext()` returns `undefined` and every
+strategy keeps its own flat APR — **byte-identical** output to the
+pre-slice-4 behaviour (the no-liquidity regression test asserts the
+exact 23-recommendation baseline, scores included).
+
+The same holds at the use-case level: `CompareStrategiesUseCase` falls
+back to `3n * 10n ** 17n` (30 %) when `liquidity` is omitted or when the
+implied APR is not credible.
+
+#### Normal CDF implementation notes
+
+`Φ(x)` is computed with the **erf power series** for `z = x/√2 ≤ 4.5`:
+
+```
+Φ(x) = ½ + (1/√π) · Σ_{n≥0} (−1)ⁿ z^(2n+1) / (n! (2n+1))
+```
+
+with the recurrence `term_n = −term_{n−1} · z² · (2n−1) / (n · (2n+1))`.
+Beyond `z = 4.5` the series cancels catastrophically (its partial sums
+grow like `e^{z²}`), so the **asymptotic `erfc` expansion** is used
+there, truncated at its smallest term:
+
+```
+erfc(z) ≈ e^{−z²} / (z√π) · Σ_{n≥0} (−1)ⁿ (2n−1)!! / (2z²)ⁿ
+```
+
+Accuracy is ≈ 1e-19 absolute — far better than the 1e-15 the roadmap's
+slice-4 test plan asks for. `√2` and `√π` are *computed* at load time
+with an integer square root (π truncated to 30 decimals) rather than
+hard-coded, so a mistyped digit cannot silently poison every result.
+
+⚠ **CDF normalisation.** The series carries a `1/√π` factor (it comes
+from `erf(z) = (2/√π)·Σ …` and `Φ(x) = ½(1 + erf(x/√2))`). The
+`1/√(2π)` constant is the *density* normalisation — using it here
+silently shrinks every probability.
+
+Verification:
+
+- `pnpm exec nuxt prepare` ✓
+- `pnpm typecheck` ✓ — still a zero-file no-op (see §6.20).
+- `pnpm exec tsc --noEmit -p .nuxt/tsconfig.app.json` → **39** errors,
+  all in untouched pre-existing files; **zero** in any changed or new
+  TVL file.
+- `pnpm test` ✓ — 24 files / 292 tests.
+- The changed `.vue` files compile cleanly with `@vue/compiler-sfc`
+  (there is no `vue-tsc` in this repo): `ALL SFCs OK`.
+
+### 6.23 TVL roadmap — slice 5: TVL history chart (done)
+
+The fifth slice: the **liquidity trend**. Slice 3 showed a *number*
+(TVL today); slice 5 shows the *shape* of it — "is liquidity leaving
+this pool?" — right next to the price curve, in the charts tab.
+
+#### New modules
+
+- `app/core/application/dtos/pool_tvl_history.dto.ts` →
+  `IPoolTvlHistoryDTO { pool, chainId, protocolId, points, externalPoolId?,
+  timestamp }` — the points are **chronologically ascending** and
+  de-duplicated by timestamp; an empty `points` array is a *normal*
+  outcome (pool not tracked), not an error.
+- `app/core/application/use_cases/get_pool_tvl_history.use_case.ts` →
+  `GetPoolTvlHistoryUseCase` (+ the exported pure helper
+  `normalizeTvlPoints()`).
+
+#### The use case
+
+```
+pool state  →  getPoolLiquidity()  →  getPoolTvlHistory()  →  DTO
+                (discovers the id)      (the history itself)
+```
+
+⚠ **Why the liquidity read comes first.** The provider only learns a
+pool's own id (a DefiLlama UUID) while it matches the *natural key*
+(`project`, chain, sorted token pair, fee tier) against the E2 index —
+and that match happens inside `getPoolLiquidity`. The history endpoint
+needs the UUID, so the use case calls the liquidity read first; the
+snapshot itself is discarded (the TVL card is slice 3's business).
+
+⚠ **Degradation.** The use case never throws for missing market data:
+an untracked pool, an unreachable provider or a failed pool read all
+yield an **empty** `points` array. Only an *invalid input* throws
+(`InvalidUseCaseInputError`). The UI hides the series in that case — it
+never renders an empty chart.
+
+⚠ **Ordering is a Core concern.** `lightweight-charts` throws on
+unsorted data, so `normalizeTvlPoints()` (sort ascending, last reading
+wins on a duplicate timestamp, negative TVL dropped) lives in the Core,
+not in the UI.
+
+#### Wiring
+
+- `app/core/application/dtos/index.ts`, `app/core/application/use_cases/index.ts`
+  — barrel exports.
+- `app/core/services/core_services.class.ts` — `ICoreUseCases` gains
+  `getPoolTvlHistory`; the instance is built with the shared
+  `IMarketDataProvider`.
+
+#### The chart (second pane)
+
+`app/utils/priceChart.ts` gained the TVL series helpers:
+
+| Export | Purpose |
+|---|---|
+| `TVL_PANE_INDEX` (1) | the TVL pane |
+| `TVL_LINE_COLOR` | violet, so it never reads as a price |
+| `toTvlLinePoints()` | `TPoolTvlPoint` → `LineData` (USD at 6 decimals → dollars) |
+| `candleTimeRange()` | the span the price candles cover |
+| `clipTvlPointsToRange()` | clip the history to that span |
+| `buildTvlSeries()` / `syncTvlSeries()` | create / update / remove the series |
+| `formatCompactUsd()` | `$1.20M` for the legend and the tooltip |
+
+- The TVL line lives in **pane 1** (`chart.addSeries(lw.LineSeries,
+  opts, 1)`) with its own right-hand scale; the pane stretch factors
+  are `3 : 1` (price : TVL). A second *scale* on the price pane was
+  rejected — the two label sets would share one gutter and overlap.
+- `lightweight-charts` creates the pane on demand when a series targets
+  a new `paneIndex`, and removes an empty pane when its last series
+  goes away — so "no TVL points" really does mean "no second pane".
+- The history is **clipped to the price candles' own span**, so a
+  multi-year TVL series can't stretch the price chart's x-axis.
+
+`app/components/PriceChart.client.vue` gained the `tvlPoints` prop, the
+`LineSeries` import, a `tvlSeries` ref and the sync lifecycle
+(`syncTvlSeries()` on every data change; the series is removed when the
+history goes empty). The crosshair tooltip appends `· TVL $1.20M` when
+the cursor is over a TVL point, and the container grows to `h-96` when
+the second pane exists.
+
+`app/components/ChartsTab.vue` loads the TVL history next to the price
+history (a **separate** try/catch: the TVL panel is a nice-to-have and
+must never hide the price chart) and renders the legend entry
+**"TVL (DefiLlama)"** with the latest reading — only when the pool is
+tracked.
+
+#### v5 typing fixes in the chart module
+
+`app/utils/priceChart.ts` was touched by this slice, so its pre-existing
+type errors were fixed as well (they were silently tolerated before):
+
+- `ILightweightChartsModule` now types the series definitions as the
+  library's own `SeriesDefinition<'Area' | 'Line' | 'Candlestick'>`
+  instead of `object`, and `LineStyle.Solid/Dashed` as the real
+  `LineStyle` enum instead of `unknown`.
+- `createSeriesMarkers(series: ISeriesApi<SeriesType>, …)` — `unknown`
+  does not satisfy the `SeriesType` constraint.
+- `range.lowerPrice` / `range.upperPrice` are `number | null`;
+  `Number.isFinite()` does **not** narrow a union, so the guard is now
+  an explicit `typeof … === 'number'` check.
+- ⚠ **v4 → v5 option rename.** The right price scale was configured with
+  `drawTicks: true`, which is a **v3/v4** option name — v5 ignores it
+  silently (the option is `ticksVisible`). The tick marks the comment
+  promised never showed up; the option is now `ticksVisible: true`.
+
+#### Tests
+
+- `app/core/test/application/use_cases/get_pool_tvl_history.test.ts` —
+  **11** network-free cases: the happy path, the external-id discovery
+  (and the provider call *order*), an untracked pool, a provider
+  failure, a pool-state failure, invalid input, chronological sorting,
+  "last duplicate wins", negative-TVL removal and empty input.
+- `app/core/test/utils/priceChart.test.ts` — a new
+  `describe('TVL series (second pane)')` block with **14** cases: the
+  USD→dollar conversion, the range clipping, the candle range, "no TVL
+  points ⇒ no series and no pane", "TVL points ⇒ a `LineSeries` in
+  pane 1 with a 3:1 stretch", the sync paths (update in place / remove
+  on empty / create on demand / no-op) and the compact USD formatter.
+  The mock now emulates the v5 pane semantics (a series with a new
+  `paneIndex` creates that pane).
+
+Verification:
+
+- `pnpm exec nuxt prepare` ✓
+- `pnpm typecheck` ✓ — still a zero-file no-op (see §6.20).
+- `pnpm exec tsc --noEmit -p .nuxt/tsconfig.app.json` → **27** errors,
+  all in untouched pre-existing files; **zero** in any changed or new
+  slice-5 file. (39 before this slice — the 12 in
+  `app/utils/priceChart.ts` + `app/core/test/utils/priceChart.test.ts`
+  are gone.)
+- `pnpm test` ✓ — 25 files / 317 tests.
+- The changed `.vue` files compile cleanly with `@vue/compiler-sfc`
+  (there is no `vue-tsc` in this repo): `ALL SFCs OK`.
 
 ---
 

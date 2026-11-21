@@ -22,6 +22,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import type {
   IPoolHistoryDTO,
+  IPoolTvlHistoryDTO,
   IRecommendationDTO,
   IRecommendationEntryDTO,
   IHistoryCandleDTO,
@@ -38,6 +39,8 @@ import {
   selectStrategyEntry,
   strategyDisplayLabel,
 } from '~/utils/strategySelection';
+import { formatCompactUsd } from '~/utils/priceChart';
+import { USD_DECIMALS } from '@core/shared/utils';
 
 interface IProps {
   pool: string;
@@ -55,6 +58,12 @@ const session = useSessionState();
 const history = ref<IPoolHistoryDTO | null>(null);
 const isLoading = ref(false);
 const error = ref<string | null>(null);
+
+// TVL history (TVL roadmap slice 5) — the optional second pane.
+// A failure here NEVER breaks the price chart: the pane simply
+// doesn't show up.
+const tvlHistory = ref<IPoolTvlHistoryDTO | null>(null);
+const tvlError = ref<string | null>(null);
 
 // Window selector state. Mirrored into session storage so the
 // user's preferred horizon survives reloads. Driven by
@@ -188,6 +197,36 @@ async function load() {
   finally {
     isLoading.value = false;
   }
+
+  // The TVL history is fetched separately: it is a nice-to-have
+  // panel, so its failure must never hide the price chart.
+  await loadTvlHistory();
+}
+
+/**
+ * Load the TVL history for the second pane.
+ *
+ * The use case degrades gracefully (an untracked pool or an
+ * unreachable provider yields an empty point list), so the only
+ * thing we have to handle here is a thrown programming error.
+ */
+async function loadTvlHistory(): Promise<void> {
+  if (!useCases) return;
+
+  const { getPoolTvlHistory } = useCases();
+
+  try {
+    tvlHistory.value = await getPoolTvlHistory.execute({
+      pool: props.pool as `0x${string}`,
+      chainId: props.chainId,
+      protocolId: props.protocolId,
+    });
+    tvlError.value = null;
+  }
+  catch (err) {
+    tvlHistory.value = null;
+    tvlError.value = err instanceof Error ? err.message : String(err);
+  }
 }
 
 onMounted(load);
@@ -210,6 +249,32 @@ const candles = computed<readonly IHistoryCandleDTO[]>(
 );
 const token0Symbol = computed(() => props.analysis?.token0.symbol ?? 'token0');
 const token1Symbol = computed(() => props.analysis?.token1.symbol ?? 'token1');
+
+// -----------------------------------------------------------------
+// TVL history (TVL roadmap slice 5)
+// -----------------------------------------------------------------
+
+/**
+ * The TVL points handed to the chart. The chart clips them to the
+ * price candles' own span so both series share one x-axis.
+ */
+const tvlPoints = computed(() => tvlHistory.value?.points ?? []);
+
+/** True when the pool is tracked and a TVL pane is drawn. */
+const hasTvl = computed(() => tvlPoints.value.length > 0);
+
+/** The latest TVL reading, in plain dollars. */
+const latestTvlUsd = computed<number | null>(() => {
+  const points = tvlPoints.value;
+  const last = points[points.length - 1];
+
+  return last ? Number(last.tvlUsd) / 10 ** USD_DECIMALS : null;
+});
+
+/** Legend label for the TVL series, e.g. "$1.20M". */
+const latestTvlLabel = computed(() =>
+  latestTvlUsd.value === null ? '—' : formatCompactUsd(latestTvlUsd.value),
+);
 
 /**
  * Footer price-band formatter. We use Intl.NumberFormat with up
@@ -325,6 +390,7 @@ function formatFooterPrice(v: number | null): string {
           :token1-symbol="token1Symbol"
           :title="chartTitle"
           :synthetic="history?.source === 'synthetic'"
+          :tvl-points="tvlPoints"
         />
         <template #fallback>
           <div class="h-80 flex items-center justify-center text-muted">
@@ -332,6 +398,26 @@ function formatFooterPrice(v: number | null): string {
           </div>
         </template>
       </ClientOnly>
+
+      <!--
+        Chart legend. The TVL entry only appears when the pool is
+        tracked by the market-data provider (DefiLlama) — an
+        untracked pool keeps the single-series chart it had before.
+      -->
+      <div class="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1 text-xs">
+        <div class="flex items-center gap-1.5">
+          <span class="h-0.5 w-4 rounded-full bg-sky-400" />
+          <span class="text-muted">Price</span>
+        </div>
+        <div v-if="hasTvl" class="flex items-center gap-1.5">
+          <span class="h-0.5 w-4 rounded-full bg-violet-400" />
+          <span class="text-muted">TVL (DefiLlama)</span>
+          <span class="font-mono text-slate-200">{{ latestTvlLabel }}</span>
+        </div>
+        <span v-if="tvlError" class="text-amber-500">
+          TVL unavailable ({{ tvlError }})
+        </span>
+      </div>
 
       <template v-if="selectedStrategy" #footer>
         <div class="flex flex-wrap gap-4 text-sm">

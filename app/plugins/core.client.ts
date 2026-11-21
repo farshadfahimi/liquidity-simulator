@@ -22,6 +22,10 @@
  *      adapters bind to the network's current `IRpcProvider` at
  *      construction time.
  *
+ *   4. A market-data provider (DefiLlama) for token USD prices,
+ *      indexed pool liquidity/TVL and TVL history. It is shared by
+ *      every use-case bundle, so its in-memory caches are shared too.
+ *
  * The whole tree is exposed as `nuxtApp.$core`, and any Nuxt-aware
  * code (composables, page components) can grab it through the
  * thin wrapper at `app/composables/useCoreServices.ts`.
@@ -52,6 +56,7 @@ import {
 import { createUniswapV3Adapter } from '@core/adapters/uniswap/v3';
 import { createShadowAdapter } from '@core/adapters/shadow';
 import type { IProtocolAdapter } from '@core/adapters/protocol_adapter.interface';
+import { createMarketDataProvider } from '@core/providers/market';
 import type { TNetwork } from '@core/shared/types';
 
 export default defineNuxtPlugin(() => {
@@ -172,6 +177,11 @@ export default defineNuxtPlugin(() => {
   const services = createCoreServices({
     network,
     adapters: buildAdapters(),
+    // Market data (token USD prices, indexed pool liquidity/TVL, TVL
+    // history) comes from DefiLlama. The provider degrades to
+    // `null` / `[]` on any failure, so the TVL card always has the
+    // on-chain fallback tiers to fall back on.
+    market: createMarketDataProvider(),
   });
 
   /**

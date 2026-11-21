@@ -41,9 +41,15 @@ import type {
   Time,
   UTCTimestamp,
   AreaData,
+  LineData,
   SeriesMarker,
+  LineStyle,
+  SeriesDefinition,
+  SeriesType,
 } from 'lightweight-charts';
 import type { IHistoryCandleDTO } from '@core/application/dtos';
+import type { TPoolTvlPoint } from '@core/shared/types';
+import { USD_DECIMALS } from '@core/shared/utils';
 import type { IOhlcCandle } from './groupSnapshotsByDay';
 
 /**
@@ -55,8 +61,22 @@ import type { IOhlcCandle } from './groupSnapshotsByDay';
  */
 export interface ILightweightChartsModule {
   createChart(container: HTMLElement, options?: unknown): IChartApi;
-  /** v5 — `chart.addSeries(AreaSeries, opts)`. */
-  AreaSeries: object;
+  /**
+   * v5 — `chart.addSeries(AreaSeries, opts)`.
+   *
+   * Typed as the library's own `SeriesDefinition<'Area'>` so the
+   * builder's `chart.addSeries(lw.AreaSeries, …)` call is checked
+   * against the real v5 signature instead of an opaque `object`.
+   */
+  AreaSeries: SeriesDefinition<'Area'>;
+  /**
+   * v5 — `chart.addSeries(LineSeries, opts, paneIndex)`.
+   *
+   * The TVL trend is drawn as a `LineSeries` in a **second pane**
+   * (its own right-hand scale), so it never competes with the price
+   * scale for vertical space.
+   */
+  LineSeries: SeriesDefinition<'Line'>;
   /**
    * v5 — `chart.addSeries(CandlestickSeries, opts)`.
    *
@@ -64,15 +84,15 @@ export interface ILightweightChartsModule {
    * library (`candlestickSeries as CandlestickSeries`); they are
    * handed straight to `chart.addSeries(...)`.
    */
-  CandlestickSeries: object;
+  CandlestickSeries: SeriesDefinition<'Candlestick'>;
   /**
    * v5 — `const m = createSeriesMarkers(series); m.setMarkers([...])`.
    * v4 hung `setMarkers` off the series itself; that's gone in v5.
    */
-  createSeriesMarkers(series: ISeriesApi<unknown>, markers?: SeriesMarker<UTCTimestamp>[], options?: unknown): ISeriesMarkersPluginApi<UTCTimestamp>;
+  createSeriesMarkers(series: ISeriesApi<SeriesType>, markers?: SeriesMarker<UTCTimestamp>[], options?: unknown): ISeriesMarkersPluginApi<UTCTimestamp>;
   LineStyle: {
-    Solid: unknown;
-    Dashed: unknown;
+    Solid: LineStyle;
+    Dashed: LineStyle;
   };
 }
 
@@ -104,6 +124,14 @@ export interface IPriceChartInput {
    * (global max) and one swing-low marker (global min).
    */
   swingWindow?: number;
+  /**
+   * TVL history (DefiLlama) for the optional **second pane**.
+   *
+   * Empty / omitted ⇒ no TVL series is created at all (the pane is
+   * not even allocated) — the price chart then looks exactly as it did
+   * before the TVL feature existed.
+   */
+  tvlPoints?: readonly TPoolTvlPoint[];
 }
 
 export interface IPriceChartHandles {
@@ -113,6 +141,11 @@ export interface IPriceChartHandles {
   priceLines: IPriceLine[];
   /** Series markers plugin (so the component can call setMarkers on update). */
   markers: ISeriesMarkersPluginApi<UTCTimestamp>;
+  /**
+   * The TVL line series in the second pane — `null` when the pool
+   * isn't tracked by the market-data provider (no points).
+   */
+  tvlSeries: ISeriesApi<'Line'> | null;
 }
 
 /** Intl formatter shared by the axis/label + tooltip helpers. */
@@ -196,9 +229,214 @@ export function toLinePoints(
 }
 
 // ---------------------------------------------------------------------------
-// Swing detection
+// TVL series (second pane)
 // ---------------------------------------------------------------------------
 
+/**
+ * The pane the TVL line lives in. Pane 0 is the price chart; pane 1
+ * is the TVL trend with its own right-hand scale.
+ */
+export const TVL_PANE_INDEX = 1;
+
+/** Colour of the TVL line — violet, so it never reads as a price. */
+export const TVL_LINE_COLOR = 'rgba(167, 139, 250, 0.95)';
+
+/**
+ * Relative heights of the two panes: the price chart keeps three
+ * quarters of the height, the TVL strip one quarter.
+ */
+const PRICE_PANE_STRETCH = 3;
+const TVL_PANE_STRETCH = 1;
+
+/**
+ * The span the price candles cover — the window the TVL points are
+ * clipped to so both series share one x-axis.
+ *
+ * Returns `null` for an empty candle list (nothing to align to).
+ */
+export function candleTimeRange(
+  candles: readonly IHistoryCandleDTO[],
+): { readonly start: number; readonly end: number } | null {
+  const first = candles[0];
+  const last = candles[candles.length - 1];
+
+  if (!first || !last) {
+    return null;
+  }
+
+  return {
+    start: Number(first.openTimestamp),
+    end: Number(last.closeTimestamp),
+  };
+}
+
+/**
+ * Convert TVL history points into line-series points.
+ *
+ * The x-axis is the **same** time scale the price candles use (unix
+ * seconds), so the TVL line lines up with the price chart without any
+ * re-bucketing. The y-value is the USD amount converted from the
+ * Core's `USD_DECIMALS` (6) bigint scale to a plain dollar number.
+ *
+ * The points are expected to be chronologically ascending — the Core
+ * guarantees that (`normalizeTvlPoints`), and `lightweight-charts`
+ * throws on unsorted data.
+ */
+export function toTvlLinePoints(
+  points: readonly TPoolTvlPoint[],
+): LineData<UTCTimestamp>[] {
+  const out: LineData<UTCTimestamp>[] = [];
+  for (const p of points) {
+    out.push({
+      time: Number(p.timestamp) as UTCTimestamp,
+      value: Number(p.tvlUsd) / 10 ** USD_DECIMALS,
+    });
+  }
+  return out;
+}
+
+/**
+ * Keep only the TVL points that fall inside an explicit time range.
+ *
+ * The price chart and the TVL chart share one time axis, so a TVL
+ * history that goes back years would stretch the price series into
+ * the right-hand edge of the chart. Clipping the TVL points to the
+ * **same** span the price candles cover keeps both series aligned
+ * and leaves the price chart's time scale exactly as it was before
+ * the TVL feature existed.
+ *
+ * The bounds are unix **seconds** and inclusive on both ends.
+ *
+ * @param points - The full history (ascending).
+ * @param startTimestamp - Inclusive lower bound (unix seconds).
+ * @param endTimestamp - Inclusive upper bound (unix seconds).
+ */
+export function clipTvlPointsToRange(
+  points: readonly TPoolTvlPoint[],
+  startTimestamp: number,
+  endTimestamp: number,
+): readonly TPoolTvlPoint[] {
+  if (!Number.isFinite(startTimestamp) || !Number.isFinite(endTimestamp)) {
+    return [];
+  }
+
+  if (endTimestamp < startTimestamp) {
+    return [];
+  }
+
+  const start = BigInt(Math.floor(startTimestamp));
+  const end = BigInt(Math.floor(endTimestamp));
+
+  return points.filter((p) => p.timestamp >= start && p.timestamp <= end);
+}
+
+/**
+ * Create the TVL line series in the second pane and fill it with the
+ * given points.
+ *
+ * @returns The series, or `null` when there are no points — the pane
+ *   is then never allocated and the chart looks exactly as before.
+ */
+export function buildTvlSeries(
+  chart: IChartApi,
+  lw: ILightweightChartsModule,
+  points: readonly TPoolTvlPoint[],
+): ISeriesApi<'Line'> | null {
+  if (points.length === 0) {
+    return null;
+  }
+
+  // v5: `chart.addSeries(LineSeries, opts, paneIndex)` — the third
+  // argument targets a pane, and lightweight-charts creates that pane
+  // on demand.
+  const series = chart.addSeries(lw.LineSeries, {
+    color: TVL_LINE_COLOR,
+    lineWidth: 2,
+    priceLineVisible: false,
+    lastValueVisible: true,
+    crosshairMarkerVisible: true,
+  }, TVL_PANE_INDEX) as ISeriesApi<'Line'>;
+
+  series.setData(toTvlLinePoints(points));
+  applyPaneStretch(chart);
+
+  // The TVL pane has its own right-hand scale; give it the same
+  // minimum width as the price scale so its labels are never
+  // clipped by the gutter.
+  chart.priceScale('right', TVL_PANE_INDEX).applyOptions({ minimumWidth: 60 });
+
+  return series;
+}
+
+/**
+ * Create / update / remove the TVL series so it matches `points`.
+ *
+ * - no points + no series ⇒ nothing happens;
+ * - no points + a series ⇒ the series is removed (and its pane with
+ *   it, which is what `lightweight-charts` does automatically);
+ * - points + a series ⇒ the data is replaced in place;
+ * - points + no series ⇒ the series is created.
+ */
+export function syncTvlSeries(
+  chart: IChartApi,
+  lw: ILightweightChartsModule,
+  existing: ISeriesApi<'Line'> | null,
+  points: readonly TPoolTvlPoint[],
+): ISeriesApi<'Line'> | null {
+  if (points.length === 0) {
+    if (existing) {
+      chart.removeSeries(existing);
+    }
+
+    return null;
+  }
+
+  if (existing) {
+    existing.setData(toTvlLinePoints(points));
+    return existing;
+  }
+
+  return buildTvlSeries(chart, lw, points);
+}
+
+/**
+ * Give the price pane three quarters of the height and the TVL pane
+ * one quarter. No-op when the chart has a single pane.
+ */
+function applyPaneStretch(chart: IChartApi): void {
+  const panes = chart.panes();
+
+  if (panes.length < 2) {
+    return;
+  }
+
+  panes[0]!.setStretchFactor(PRICE_PANE_STRETCH);
+  panes[1]!.setStretchFactor(TVL_PANE_STRETCH);
+}
+
+/**
+ * Compact USD formatter for the legend / tooltip: `$1.2M`, `$340K`,
+ * `$12.50`. Keeps the TVL readable next to a price that may carry
+ * six fraction digits.
+ */
+export function formatCompactUsd(value: number): string {
+  if (!Number.isFinite(value)) {
+    return '—';
+  }
+
+  const abs = Math.abs(value);
+  const sign = value < 0 ? '-' : '';
+
+  if (abs >= 1e9) return `${sign}$${(abs / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${sign}$${(abs / 1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return `${sign}$${(abs / 1e3).toFixed(1)}K`;
+
+  return `${sign}$${abs.toFixed(2)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Swing detection
+// ---------------------------------------------------------------------------
 export interface ISwingPoint {
   /** Index in the candles array. */
   index: number;
@@ -335,24 +573,29 @@ export function applyDataAndOverlays(
   const priceLines: IPriceLine[] = [];
   const range = input.strategyRange;
   if (range) {
-    if (Number.isFinite(range.lowerPrice) && range.lowerPrice > 0) {
+    // `lowerPrice` / `upperPrice` are `number | null` — the null
+    // check has to be an explicit `typeof` guard because
+    // `Number.isFinite` does not narrow the type.
+    const lower = range.lowerPrice;
+    if (typeof lower === 'number' && Number.isFinite(lower) && lower > 0) {
       priceLines.push(series.createPriceLine({
-        price: range.lowerPrice,
+        price: lower,
         color: 'rgba(34, 197, 94, 1)',
         lineWidth: 3,
         lineStyle: lw.LineStyle.Solid,
         axisLabelVisible: true,
-        title: `↓ ${formatAxisPrice(range.lowerPrice)}`,
+        title: `↓ ${formatAxisPrice(lower)}`,
       }));
     }
-    if (Number.isFinite(range.upperPrice) && range.upperPrice > 0) {
+    const upper = range.upperPrice;
+    if (typeof upper === 'number' && Number.isFinite(upper) && upper > 0) {
       priceLines.push(series.createPriceLine({
-        price: range.upperPrice,
+        price: upper,
         color: 'rgba(34, 197, 94, 1)',
         lineWidth: 3,
         lineStyle: lw.LineStyle.Solid,
         axisLabelVisible: true,
-        title: `↑ ${formatAxisPrice(range.upperPrice)}`,
+        title: `↑ ${formatAxisPrice(upper)}`,
       }));
     }
   }
@@ -446,7 +689,11 @@ export function buildPriceChart(
     minimumWidth: 60,
     // Draw the small horizontal tick marks on the scale even if
     // the host hasn't enabled them at the layout level.
-    drawTicks: true,
+    //
+    // NOTE: v5 renamed the v3/v4 `drawTicks` option to
+    // `ticksVisible` — the old name is silently ignored by the
+    // library, so the ticks never showed up.
+    ticksVisible: true,
   });
 
   const series = chart.addSeries(lw.AreaSeries, {
@@ -470,7 +717,12 @@ export function buildPriceChart(
 
   const priceLines = applyDataAndOverlays(series, input, lw, [], markers);
 
-  return { chart, series, priceLines, markers };
+  // Optional TVL trend in a SECOND pane (TVL roadmap slice 5).
+  // No points ⇒ no series and no pane at all, so the chart looks
+  // exactly as it did before the TVL feature existed.
+  const tvlSeries = buildTvlSeries(chart, lw, input.tvlPoints ?? []);
+
+  return { chart, series, priceLines, markers, tvlSeries };
 }
 
 /**

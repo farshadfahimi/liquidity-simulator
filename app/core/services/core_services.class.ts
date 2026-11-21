@@ -8,11 +8,17 @@ import {
   ReplayHistoricalPerformanceUseCase,
   CompareStrategiesUseCase,
   GetPoolHistoryUseCase,
+  GetPoolTvlUseCase,
+  GetPoolTvlHistoryUseCase,
   type TAdapterResolver,
 } from '../application/use_cases';
 import { AdapterNotFoundError } from '../application/errors/adapter_not_found_error';
 import type { IProtocolAdapter } from '../adapters/protocol_adapter.interface';
 import type { IRpcProvider } from '../providers/rpc';
+import {
+  createMarketDataProvider,
+  type IMarketDataProvider,
+} from '../providers/market';
 import type { INetworkProvider } from '../network/network_provider.interface';
 
 /**
@@ -57,6 +63,15 @@ export class CoreServices {
 
   readonly adapters: TAdapterRegistry;
 
+  /**
+   * The market-data provider (token prices, pool liquidity, TVL
+   * history). Defaults to the DefiLlama provider; tests inject a
+   * stub instead. It is held here so every use-case bundle built by
+   * {@link useCases} shares the same provider — and therefore the
+   * same in-memory caches.
+   */
+  readonly market: IMarketDataProvider;
+
   private readonly pickAdapter: TAdapterPicker;
 
   constructor(opts: {
@@ -64,11 +79,13 @@ export class CoreServices {
     analytics?: AnalyticsEngine;
     adapters?: TAdapterRegistry;
     pickAdapter?: TAdapterPicker;
+    market?: IMarketDataProvider;
   }) {
     this.network = opts.network;
     this.analytics = opts.analytics ?? new AnalyticsEngine();
     this.adapters = opts.adapters ?? new Map();
     this.pickAdapter = opts.pickAdapter ?? defaultAdapterPicker;
+    this.market = opts.market ?? createMarketDataProvider();
   }
 
   /** Register an adapter under its chain. */
@@ -127,6 +144,15 @@ export class CoreServices {
         () => this.rpc(),
         this.analytics,
       ),
+      getPoolTvl: new GetPoolTvlUseCase(
+        resolver,
+        this.market,
+        this.analytics,
+      ),
+      getPoolTvlHistory: new GetPoolTvlHistoryUseCase(
+        resolver,
+        this.market,
+      ),
     };
   }
 }
@@ -174,4 +200,8 @@ export interface ICoreUseCases {
   readonly compareStrategies: CompareStrategiesUseCase;
 
   readonly getPoolHistory: GetPoolHistoryUseCase;
+
+  readonly getPoolTvl: GetPoolTvlUseCase;
+
+  readonly getPoolTvlHistory: GetPoolTvlHistoryUseCase;
 }

@@ -61,7 +61,7 @@ export class ShadowAdapter implements IProtocolAdapter {
       meta.token0,
       meta.token1,
     ]);
-    const { tick, sqrtPriceX96 } = await this.reader.readStateAtBlock(
+    const { tick, sqrtPriceX96, liquidity } = await this.reader.readStateAtBlock(
       pool,
       blockNumber,
     );
@@ -74,7 +74,11 @@ export class ShadowAdapter implements IProtocolAdapter {
       tickSpacing: meta.tickSpacing,
       sqrtPriceX96,
       tick,
-      liquidity: 0n,
+      // `liquidity` is read at the pinned block so historical
+      // snapshots can carry an on-chain TVL estimate (TVL roadmap
+      // slice 1). The fee-growth accumulators are only consumed by
+      // the quote / replay paths — they stay zero here.
+      liquidity,
       feeGrowthGlobal0X128: 0n,
       feeGrowthGlobal1X128: 0n,
     };

@@ -21,7 +21,7 @@ import type { TChainId } from './chain_id.type';
  * Shadow has 20k) or include tokens the active adapter doesn't
  * recognize. Adapters are the right unit of indirection.
  *
- * Pure data — implementations live in `app/core/adapters/**/sources/`
+ * Pure data — implementations live in `app/core/adapters/<protocol>/sources/`
  * and are free to use `fetch()`, the Graph, or a static blob.
  * `ITokenSource` is UI-agnostic; the composable layer in
  * `app/composables/useTokenList.ts` adds caching, fallback,

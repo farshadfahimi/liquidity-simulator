@@ -8,7 +8,7 @@ import {
 } from '../../math';
 import type { Pool } from '../pool';
 import type { Position } from '../position';
-import type { IRecommendationStrategy } from '../strategy';
+import type { IRecommendationStrategy, IStrategyContext } from '../strategy';
 
 /**
  * Options for {@link HighestSharpeStrategy}.
@@ -100,7 +100,7 @@ export class HighestSharpeStrategy implements IRecommendationStrategy {
     });
   }
 
-  score(pool: Pool, position: Position): bigint {
+  score(pool: Pool, position: Position, context?: IStrategyContext): bigint {
     const ce = capitalEfficiencyRatio(
       position.range.tickLower,
       position.range.tickUpper,
@@ -114,7 +114,11 @@ export class HighestSharpeStrategy implements IRecommendationStrategy {
       return 0n;
     }
 
-    const excessApr = this.expectedApr - this.riskFreeApr;
+    // APR: the range-specific expectation when the caller supplied a
+    // pool context (TVL roadmap slice 4), else the strategy's prior.
+    const apr = context?.expectedApr ?? this.expectedApr;
+
+    const excessApr = apr - this.riskFreeApr;
 
     if (excessApr <= 0n) {
       return 0n;
@@ -125,7 +129,7 @@ export class HighestSharpeStrategy implements IRecommendationStrategy {
     }
 
     const sharpe = sharpeLikeScore(
-      this.expectedApr,
+      apr,
       this.annualizedVolatility,
       this.riskFreeApr,
     );
