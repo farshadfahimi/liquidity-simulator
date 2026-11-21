@@ -13,6 +13,7 @@ import {
   realizedVolatility,
   aprFromFees,
   sharpeLikeScore,
+  virtualReservesInUsd,
 } from '../../math';
 import type { IPriceObservation, IVolatilityResult } from '../../math';
 import type { Pool } from '../pool';
@@ -39,6 +40,10 @@ import type { Position } from '../position';
  *     series.
  *   - APR from observed fees over a window.
  *   - Sharpe-like score combining expected APR + vol.
+ *
+ * Metrics added by the TVL roadmap (slice 1):
+ *   - On-chain pool TVL (virtual reserves valued with USD prices).
+ *   - Position share of pool (exit-impact guard).
  */
 export class AnalyticsEngine {
   constructor() {}
@@ -267,6 +272,81 @@ export class AnalyticsEngine {
       inRange: side.inRange,
       side: side.side,
     };
+  }
+
+  // -----------------------------------------------------------------
+  // TVL metrics (TVL-ROADMAP slice 1 — on-chain baseline)
+  // -----------------------------------------------------------------
+
+  /**
+   * On-chain TVL of `pool`, valued with caller-supplied USD prices.
+   *
+   * This is the **offline tier** of the TVL fallback chain: it uses
+   * only what the pool state already carries (`liquidity` +
+   * `sqrtPriceX96`) plus two prices, so it works with zero external
+   * calls.
+   *
+   * Caveat: only the liquidity *active at the current tick* is
+   * counted, so the result is an **estimate** — the caller must
+   * label it as such (`source: 'on-chain-estimates'`).
+   *
+   * @param pool - The pool to value.
+   * @param token0Usd - USD price of token0 at 1e18 (e.g. `1e18` == $1).
+   * @param token1Usd - USD price of token1 at 1e18.
+   * @returns TVL in USD at `USD_DECIMALS` (1e6 == $1.00). `0n` when
+   *   the pool has no active liquidity.
+   */
+  poolTvlOnChain(
+    pool: Pool,
+    token0Usd: bigint,
+    token1Usd: bigint,
+  ): bigint {
+    return virtualReservesInUsd(
+      pool.state.liquidity,
+      pool.state.sqrtPriceX96,
+      pool.state.token0.decimals,
+      pool.state.token1.decimals,
+      token0Usd,
+      token1Usd,
+    );
+  }
+
+  /**
+   * Share of the pool a position represents — the exit-impact guard.
+   *
+   *     share = notionalUsd / tvlUsd
+   *
+   * A position that owns a large slice of the pool moves the price
+   * on entry and exit, so the UI warns above a configurable
+   * threshold (2% by default).
+   *
+   * @param notionalUsd - Position notional in USD at `USD_DECIMALS`.
+   * @param tvlUsd - Pool TVL in USD at `USD_DECIMALS`. `0n` means
+   *   "unknown" and yields a `0n` share (no warning).
+   * @returns Share at `SCORE_SCALE` (1e18 == 1.0 == 100%).
+   */
+  positionShareOfPool(
+    notionalUsd: bigint,
+    tvlUsd: bigint,
+  ): bigint {
+    if (notionalUsd < 0n) {
+      throw new Error(
+        `positionShareOfPool: notionalUsd must be non-negative, got ${notionalUsd}`,
+      );
+    }
+
+    if (tvlUsd < 0n) {
+      throw new Error(
+        `positionShareOfPool: tvlUsd must be non-negative, got ${tvlUsd}`,
+      );
+    }
+
+    if (tvlUsd === 0n) {
+      // Unknown TVL → no share to report.
+      return 0n;
+    }
+
+    return (notionalUsd * SCORE_SCALE) / tvlUsd;
   }
 }
 

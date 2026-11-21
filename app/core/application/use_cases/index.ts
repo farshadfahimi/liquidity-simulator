@@ -27,6 +27,21 @@ export {
 export type { IGetPoolHistoryInput } from './get_pool_history.use_case';
 export { GetPoolHistoryUseCase } from './get_pool_history.use_case';
 
+export type { IGetPoolTvlInput } from './get_pool_tvl.use_case';
+export { GetPoolTvlUseCase } from './get_pool_tvl.use_case';
+
+export type { IGetPoolTvlHistoryInput } from './get_pool_tvl_history.use_case';
+export {
+  GetPoolTvlHistoryUseCase,
+  normalizeTvlPoints,
+} from './get_pool_tvl_history.use_case';
+
+export {
+  FEE_RATE_DIVISOR,
+  MAX_REASONABLE_FEE_APR,
+  impliedFeeApr,
+} from './implied_fee_apr.util';
+
 export type {
   IAggregatableSnapshotInput,
   IAggregateHistoryInput,

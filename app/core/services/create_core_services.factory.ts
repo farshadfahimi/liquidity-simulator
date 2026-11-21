@@ -2,6 +2,7 @@
 
 import { CoreServices, type TAdapterRegistry, type TAdapterPicker } from './core_services.class';
 import { AnalyticsEngine } from '../domains/analytics';
+import type { IMarketDataProvider } from '../providers/market';
 import type { INetworkProvider } from '../network/network_provider.interface';
 
 /**
@@ -20,6 +21,10 @@ import type { INetworkProvider } from '../network/network_provider.interface';
  * `pickAdapter` — optional override for the default adapter-picker
  *   strategy.
  *
+ * `market` — optional override for the market-data provider
+ *   (token prices / pool liquidity / TVL history). Defaults to the
+ *   DefiLlama provider built by `createMarketDataProvider()`.
+ *
  * `initialChainId` — optional initial chain to activate on the
  *   network provider. Defaults to `network.current().id` (i.e. the
  *   network provider's own initial chain).
@@ -32,6 +37,8 @@ export interface ICreateCoreServicesOptions {
   readonly analytics?: AnalyticsEngine;
 
   readonly pickAdapter?: TAdapterPicker;
+
+  readonly market?: IMarketDataProvider;
 }
 
 /**
@@ -65,5 +72,6 @@ export function createCoreServices(
     analytics: opts.analytics,
     adapters: opts.adapters,
     pickAdapter: opts.pickAdapter,
+    market: opts.market,
   });
 }

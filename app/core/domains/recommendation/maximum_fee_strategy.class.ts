@@ -10,7 +10,7 @@ import {
 } from '../../math';
 import type { Pool } from '../pool';
 import type { Position } from '../position';
-import type { IRecommendationStrategy } from '../strategy';
+import type { IRecommendationStrategy, IStrategyContext } from '../strategy';
 
 /**
  * Options for {@link MaximumFeeStrategy}.
@@ -65,17 +65,21 @@ export class MaximumFeeStrategy implements IRecommendationStrategy {
     this.expectedApr = options.expectedApr;
   }
 
-  score(pool: Pool, position: Position): bigint {
+  score(pool: Pool, position: Position, context?: IStrategyContext): bigint {
     const ce = capitalEfficiencyRatio(
       position.range.tickLower,
       position.range.tickUpper,
       pool.state.tick,
     );
 
+    // APR: the range-specific expectation when the caller supplied a
+    // pool context (TVL roadmap slice 4), else the strategy's prior.
+    const apr = context?.expectedApr ?? this.expectedApr;
+
     // APR factor.
-    const aprFactor = this.expectedApr >= MaximumFeeStrategy.APR_FACTOR_CAP
+    const aprFactor = apr >= MaximumFeeStrategy.APR_FACTOR_CAP
       ? SCORE_SCALE
-      : (this.expectedApr * SCORE_SCALE) / MaximumFeeStrategy.APR_FACTOR_CAP;
+      : (apr * SCORE_SCALE) / MaximumFeeStrategy.APR_FACTOR_CAP;
 
     if (aprFactor === 0n) {
       return 0n;

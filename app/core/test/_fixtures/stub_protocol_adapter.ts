@@ -23,6 +23,7 @@ import type { TAddress } from '@core/shared/types';
 export interface IStubPoolToken {
   readonly address: TAddress;
   readonly symbol: string;
+  readonly name?: string;
   readonly decimals: number;
 }
 
@@ -85,11 +86,13 @@ export function createStubProtocolAdapter(
     token0: {
       address: options.token0.address,
       symbol: options.token0.symbol,
+      name: options.token0.name ?? options.token0.symbol,
       decimals: options.token0.decimals,
     },
     token1: {
       address: options.token1.address,
       symbol: options.token1.symbol,
+      name: options.token1.name ?? options.token1.symbol,
       decimals: options.token1.decimals,
     },
     fee: options.fee,

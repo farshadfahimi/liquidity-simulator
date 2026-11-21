@@ -1,6 +1,9 @@
 // app/core/application/dtos/index.ts
 
 export type { IPoolAnalysisDTO, ITokenSummaryDTO } from './pool_analysis.dto';
+export type { IPoolTvlDTO } from './pool_tvl.dto';
+export { toPoolLiquidity } from './pool_tvl.dto';
+export type { IPoolTvlHistoryDTO } from './pool_tvl_history.dto';
 export type {
   IPositionSimulationDTO,
   IQuoteSummaryDTO,

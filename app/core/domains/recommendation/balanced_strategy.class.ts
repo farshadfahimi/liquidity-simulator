@@ -11,7 +11,7 @@ import {
 import type { Price } from '../../shared/value_objects';
 import type { Pool } from '../pool';
 import type { Position } from '../position';
-import type { IRecommendationStrategy } from '../strategy';
+import type { IRecommendationStrategy, IStrategyContext } from '../strategy';
 
 /**
  * Options for {@link BalancedStrategy}.
@@ -106,7 +106,7 @@ export class BalancedStrategy implements IRecommendationStrategy {
     this.entryPrice = options.entryPrice;
   }
 
-  score(pool: Pool, position: Position): bigint {
+  score(pool: Pool, position: Position, context?: IStrategyContext): bigint {
     // CE factor: log-normalised capital efficiency at the pool's
     // current tick. 0 for a (near) full-range span.
     const ce = capitalEfficiencyRatio(
@@ -120,8 +120,12 @@ export class BalancedStrategy implements IRecommendationStrategy {
       return 0n;
     }
 
+    // APR: the range-specific expectation when the caller supplied a
+    // pool context (TVL roadmap slice 4), else the strategy's prior.
+    const apr = context?.expectedApr ?? this.expectedApr;
+
     // APR factor: clamp APR ∈ [0, 100%].
-    const excessApr = this.expectedApr - this.riskFreeApr;
+    const excessApr = apr - this.riskFreeApr;
 
     if (excessApr <= 0n) {
       return 0n;

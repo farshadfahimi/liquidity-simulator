@@ -33,8 +33,12 @@ export interface IScoringConfigFields {
   /**
    * Per-strategy weight multipliers. Strategies not listed default
    * to `SCORE_SCALE` (1.0× — no scaling).
+   *
+   * Optional: omitting it (or passing an empty map) means "1.0× on
+   * every strategy", which is what {@link defaultScoringConfig}
+   * does.
    */
-  readonly weights: Readonly<Record<string, bigint>>;
+  readonly weights?: Readonly<Record<string, bigint>>;
 
   /**
    * Risk-free APR subtracted from strategy-derived APR before

@@ -107,23 +107,30 @@ export class ShadowPoolStateReader {
   }
 
   /**
-   * Read pool state pinned to a specific historical block. Only
-   * fetches `slot0`; metadata is constant for a pool. Public RPCs
-   * without archive state will throw — the caller treats that as
-   * a signal to fall back to a synthetic history.
+   * Read pool state pinned to a specific historical block. Reads
+   * `slot0` (price + tick) and `liquidity` (the active liquidity an
+   * on-chain TVL estimate is built from); metadata is constant for a
+   * pool. Public RPCs without archive state will throw — the caller
+   * treats that as a signal to fall back to a synthetic history.
    */
   async readStateAtBlock(
     pool: TAddress,
     blockNumber: bigint,
-  ): Promise<{ tick: number; sqrtPriceX96: bigint }> {
-    const [slot0] = await this.rpc.multicall<
-      readonly unknown[]
+  ): Promise<{ tick: number; sqrtPriceX96: bigint; liquidity: bigint }> {
+    const [slot0, liquidity] = await this.rpc.multicall<
+      readonly unknown[] | bigint
     >(
       [
         {
           address: pool,
           abi: shadowV3PoolAbi,
           functionName: 'slot0',
+          blockTag: blockNumber,
+        },
+        {
+          address: pool,
+          abi: shadowV3PoolAbi,
+          functionName: 'liquidity',
           blockTag: blockNumber,
         },
       ],
@@ -133,7 +140,11 @@ export class ShadowPoolStateReader {
     const sqrtPriceX96 = BigInt(slot[0] as bigint);
     const tick = Number(slot[1] as number);
 
-    return { tick, sqrtPriceX96 };
+    return {
+      tick,
+      sqrtPriceX96,
+      liquidity: BigInt(liquidity as bigint),
+    };
   }
 
   async readTicks(

@@ -17,18 +17,26 @@
 // is an `IHistoryCandleDTO` — not a raw `IHistorySnapshotDTO`.
 
 import { describe, it, expect, vi } from 'vitest';
+import type { UTCTimestamp } from 'lightweight-charts';
 import type { IHistoryCandleDTO } from '@core/application/dtos';
+import type { TPoolTvlPoint } from '@core/shared/types';
 
 import {
   applyDataAndOverlays,
   buildPriceChart,
   buildSwingMarkers,
+  candleTimeRange,
   candlesToOhlc,
+  clipTvlPointsToRange,
   exactPriceToNumber,
   findSwingPoints,
   formatAxisPrice,
+  formatCompactUsd,
   formatCrosshair,
+  syncTvlSeries,
   toLinePoints,
+  toTvlLinePoints,
+  TVL_PANE_INDEX,
   type ILightweightChartsModule,
 } from '../../../utils/priceChart';
 
@@ -64,6 +72,11 @@ function candle(
 // removed v4 methods (`addAreaSeries`, `addLineSeries`,
 // `addCandlestickSeries`, `series.setMarkers`, ...) the mock
 // throws "is not a function" and the test fails.
+//
+// The mock also emulates the v5 **pane** semantics: a series added
+// with a `paneIndex` beyond the current maximum creates that pane
+// on demand (exactly what the real library does), and
+// `chart.panes()` reports them back.
 function createMockLw(): {
   module: ILightweightChartsModule;
   spy: {
@@ -73,8 +86,15 @@ function createMockLw(): {
     removePriceLine: ReturnType<typeof vi.fn>;
     createSeriesMarkers: ReturnType<typeof vi.fn>;
     setMarkers: ReturnType<typeof vi.fn>;
+    removeSeries: ReturnType<typeof vi.fn>;
+    setStretchFactor: ReturnType<typeof vi.fn>;
   };
   priceLines: { removed: number[] };
+  series: {
+    created: { kind: string; paneIndex: number | undefined; data: unknown[] }[];
+    removed: unknown[];
+  };
+  panes: { stretch: number[] };
 } {
   const priceLines: { removed: number[] } = { removed: [] };
   const setData = vi.fn();
@@ -87,11 +107,43 @@ function createMockLw(): {
   });
   const setMarkers = vi.fn();
   const createSeriesMarkers = vi.fn(() => ({ setMarkers }));
-  const addSeries = vi.fn(() => ({
-    setData,
-    createPriceLine,
-    removePriceLine,
-  }));
+
+  const series = {
+    created: [] as { kind: string; paneIndex: number | undefined; data: unknown[] }[],
+    removed: [] as unknown[],
+  };
+  const panes = { stretch: [] as number[] };
+  const removeSeries = vi.fn((s: unknown) => {
+    series.removed.push(s);
+  });
+  const setStretchFactor = vi.fn((factor: number) => {
+    panes.stretch.push(factor);
+  });
+
+  let maxPaneIndex = 0;
+  const addSeries = vi.fn((
+    definition: { __kind?: string },
+    _options: unknown,
+    paneIndex?: number,
+  ) => {
+    const entry = {
+      kind: definition?.__kind ?? 'unknown',
+      paneIndex,
+      data: [] as unknown[],
+    };
+    series.created.push(entry);
+    maxPaneIndex = Math.max(maxPaneIndex, paneIndex ?? 0);
+
+    return {
+      setData: vi.fn((points: unknown) => {
+        entry.data.push(points);
+        setData(points);
+      }),
+      createPriceLine,
+      removePriceLine,
+    };
+  });
+
   const priceScaleApply = vi.fn();
   const createChart = vi.fn(() => ({
     addSeries,
@@ -99,18 +151,35 @@ function createMockLw(): {
     priceScale: () => ({ applyOptions: priceScaleApply }),
     subscribeCrosshairMove: vi.fn(),
     remove: vi.fn(),
+    removeSeries,
+    panes: () => Array.from({ length: maxPaneIndex + 1 }, (_, index) => ({
+      paneIndex: index,
+      setStretchFactor,
+    })),
   }));
 
   return {
     module: {
       AreaSeries: { __kind: 'AreaSeries' },
+      LineSeries: { __kind: 'LineSeries' },
       CandlestickSeries: { __kind: 'CandlestickSeries' },
       LineStyle: { Solid: 'solid', Dashed: 'dashed' },
       createChart,
       createSeriesMarkers,
     } as unknown as ILightweightChartsModule,
-    spy: { addSeries, setData, createPriceLine, removePriceLine, createSeriesMarkers, setMarkers },
+    spy: {
+      addSeries,
+      setData,
+      createPriceLine,
+      removePriceLine,
+      createSeriesMarkers,
+      setMarkers,
+      removeSeries,
+      setStretchFactor,
+    },
     priceLines,
+    series,
+    panes,
   };
 }
 
@@ -173,8 +242,8 @@ describe('priceChart utility', () => {
         candle(D1 + SECONDS_PER_DAY, '200000'),
       ]);
       expect(points).toEqual([
-        { time: D1,                  value: 0.11 },
-        { time: D1 + SECONDS_PER_DAY, value: 0.2 },
+        { time: D1 as UTCTimestamp,                  value: 0.11 },
+        { time: (D1 + SECONDS_PER_DAY) as UTCTimestamp, value: 0.2 },
       ]);
     });
     it('returns [] for empty candles', () => {
@@ -256,8 +325,8 @@ describe('priceChart utility', () => {
     it('places swing high aboveBar with arrowDown + red color, swing low belowBar with arrowUp + green color', () => {
       const markers = buildSwingMarkers(
         [
-          { index: 0, time: 1_000, price: 80, kind: 'low' },
-          { index: 1, time: 1_001, price: 150, kind: 'high' },
+          { index: 0, time: 1_000 as UTCTimestamp, price: 80, kind: 'low' },
+          { index: 1, time: 1_001 as UTCTimestamp, price: 150, kind: 'high' },
         ],
         'USDC',
       );
@@ -366,7 +435,10 @@ describe('priceChart utility', () => {
       expect(priceScaleApply).toHaveBeenCalledTimes(1);
       const opts = priceScaleApply.mock.calls[0]![0] as Record<string, unknown>;
       expect(opts.minimumWidth).toBeGreaterThanOrEqual(40);
-      expect(opts.drawTicks).toBe(true);
+      // v5 renamed the v3/v4 `drawTicks` option to `ticksVisible`;
+      // the old name is silently ignored by the library.
+      expect(opts.ticksVisible).toBe(true);
+      expect(opts.drawTicks).toBeUndefined();
     });
 
     it('replaces markers when applyDataAndOverlays is called twice (no accumulation)', () => {
@@ -500,6 +572,205 @@ describe('priceChart utility', () => {
       expect(badge.swingHighLabel).toContain('0.15');
       expect(badge.swingLowLabel).toContain('low');
       expect(badge.swingLowLabel).toContain('0.08');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // TVL roadmap slice 5 — the optional second pane
+  // -------------------------------------------------------------------------
+  describe('TVL series (second pane)', () => {
+    const D1 = 1_704_067_200;
+
+    /** A TVL point: unix seconds + USD at 6 decimals. */
+    function tvl(timestamp: number, usd: number): TPoolTvlPoint {
+      return {
+        timestamp: BigInt(timestamp),
+        tvlUsd: BigInt(Math.round(usd * 1_000_000)),
+      };
+    }
+
+    describe('toTvlLinePoints', () => {
+      it('converts the 6-decimal USD bigint to plain dollars', () => {
+        const points = toTvlLinePoints([
+          tvl(D1, 1.5),
+          tvl(D1 + SECONDS_PER_DAY, 2_500),
+        ]);
+        expect(points).toEqual([
+          { time: D1 as UTCTimestamp, value: 1.5 },
+          { time: (D1 + SECONDS_PER_DAY) as UTCTimestamp, value: 2500 },
+        ]);
+      });
+
+      it('returns [] for an empty history', () => {
+        expect(toTvlLinePoints([])).toEqual([]);
+      });
+    });
+
+    describe('clipTvlPointsToRange', () => {
+      it('keeps only the points inside the range (bounds inclusive)', () => {
+        const points = [
+          tvl(D1 - 1_000, 1),
+          tvl(D1, 2),
+          tvl(D1 + 1_000, 3),
+        ];
+        expect(clipTvlPointsToRange(points, D1, D1 + 1_000)).toEqual([
+          tvl(D1, 2),
+          tvl(D1 + 1_000, 3),
+        ]);
+      });
+
+      it('returns [] for an inverted or non-finite range', () => {
+        const points = [tvl(D1, 1)];
+        expect(clipTvlPointsToRange(points, D1 + 10, D1)).toEqual([]);
+        expect(clipTvlPointsToRange(points, NaN, D1)).toEqual([]);
+      });
+    });
+
+    describe('candleTimeRange', () => {
+      it('spans from the first candle open to the last candle close', () => {
+        const range = candleTimeRange([
+          candle(D1, '100000'),
+          candle(D1 + SECONDS_PER_DAY, '200000'),
+        ]);
+        expect(range).toEqual({
+          start: D1,
+          end: D1 + 2 * SECONDS_PER_DAY,
+        });
+      });
+
+      it('returns null for an empty candle list', () => {
+        expect(candleTimeRange([])).toBeNull();
+      });
+    });
+
+    describe('buildPriceChart', () => {
+      it('creates NO TVL series and NO second pane when there are no TVL points', () => {
+        const { module, spy, panes } = createMockLw();
+        const handles = buildPriceChart({
+          candles: [candle(D1, '100000')],
+          strategyRange: null,
+          token0Symbol: 'WETH',
+          token1Symbol: 'USDC',
+        }, module, {} as HTMLElement);
+
+        expect(handles.tvlSeries).toBeNull();
+        expect(spy.addSeries).toHaveBeenCalledTimes(1);
+        expect(spy.addSeries.mock.calls[0]![0]).toBe(module.AreaSeries);
+        expect(panes.stretch).toEqual([]);
+      });
+
+      it('adds the TVL line to the SECOND pane (paneIndex 1) and returns it', () => {
+        const { module, spy, series, panes } = createMockLw();
+        const handles = buildPriceChart({
+          candles: [candle(D1, '100000')],
+          strategyRange: null,
+          token0Symbol: 'WETH',
+          token1Symbol: 'USDC',
+          tvlPoints: [tvl(D1, 1_500), tvl(D1 + SECONDS_PER_DAY, 2_000)],
+        }, module, {} as HTMLElement);
+
+        expect(spy.addSeries).toHaveBeenCalledTimes(2);
+        expect(spy.addSeries.mock.calls[1]![0]).toBe(module.LineSeries);
+        expect(spy.addSeries.mock.calls[1]![2]).toBe(TVL_PANE_INDEX);
+        expect(handles.tvlSeries).not.toBeNull();
+
+        // The pane heights: price 3/4, TVL 1/4.
+        expect(panes.stretch).toEqual([3, 1]);
+
+        // The series carries the converted USD values.
+        expect(series.created[1]!.data[0]).toEqual([
+          { time: D1 as UTCTimestamp, value: 1500 },
+          { time: (D1 + SECONDS_PER_DAY) as UTCTimestamp, value: 2000 },
+        ]);
+      });
+    });
+
+    describe('syncTvlSeries', () => {
+      it('updates an existing series in place', () => {
+        const { module, series } = createMockLw();
+        const handles = buildPriceChart({
+          candles: [candle(D1, '100000')],
+          strategyRange: null,
+          token0Symbol: 'WETH',
+          token1Symbol: 'USDC',
+          tvlPoints: [tvl(D1, 1)],
+        }, module, {} as HTMLElement);
+
+        const next = syncTvlSeries(
+          handles.chart,
+          module,
+          handles.tvlSeries,
+          [tvl(D1, 2), tvl(D1 + SECONDS_PER_DAY, 3)],
+        );
+
+        expect(next).toBe(handles.tvlSeries);
+        expect(series.created).toHaveLength(2); // no new series created
+        expect(series.created[1]!.data).toHaveLength(2); // data replaced
+        expect(series.created[1]!.data[1]).toEqual([
+          { time: D1 as UTCTimestamp, value: 2 },
+          { time: (D1 + SECONDS_PER_DAY) as UTCTimestamp, value: 3 },
+        ]);
+      });
+
+      it('removes the series when the history becomes empty', () => {
+        const { module, spy } = createMockLw();
+        const handles = buildPriceChart({
+          candles: [candle(D1, '100000')],
+          strategyRange: null,
+          token0Symbol: 'WETH',
+          token1Symbol: 'USDC',
+          tvlPoints: [tvl(D1, 1)],
+        }, module, {} as HTMLElement);
+
+        const next = syncTvlSeries(handles.chart, module, handles.tvlSeries, []);
+
+        expect(next).toBeNull();
+        expect(spy.removeSeries).toHaveBeenCalledTimes(1);
+      });
+
+      it('creates the series on demand when there was none', () => {
+        const { module, spy } = createMockLw();
+        const handles = buildPriceChart({
+          candles: [candle(D1, '100000')],
+          strategyRange: null,
+          token0Symbol: 'WETH',
+          token1Symbol: 'USDC',
+        }, module, {} as HTMLElement);
+
+        const next = syncTvlSeries(handles.chart, module, null, [tvl(D1, 1)]);
+
+        expect(next).not.toBeNull();
+        expect(spy.addSeries).toHaveBeenCalledTimes(2);
+        expect(spy.addSeries.mock.calls[1]![2]).toBe(TVL_PANE_INDEX);
+      });
+
+      it('is a no-op when there is neither a series nor points', () => {
+        const { module, spy } = createMockLw();
+        const handles = buildPriceChart({
+          candles: [candle(D1, '100000')],
+          strategyRange: null,
+          token0Symbol: 'WETH',
+          token1Symbol: 'USDC',
+        }, module, {} as HTMLElement);
+
+        expect(syncTvlSeries(handles.chart, module, null, [])).toBeNull();
+        expect(spy.addSeries).toHaveBeenCalledTimes(1);
+        expect(spy.removeSeries).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('formatCompactUsd', () => {
+      it('formats billions / millions / thousands / plain dollars', () => {
+        expect(formatCompactUsd(2_500_000_000)).toBe('$2.50B');
+        expect(formatCompactUsd(1_200_000)).toBe('$1.20M');
+        expect(formatCompactUsd(340_000)).toBe('$340.0K');
+        expect(formatCompactUsd(12.5)).toBe('$12.50');
+      });
+
+      it('renders non-finite values as an em dash', () => {
+        expect(formatCompactUsd(NaN)).toBe('—');
+        expect(formatCompactUsd(Infinity)).toBe('—');
+      });
     });
   });
 });

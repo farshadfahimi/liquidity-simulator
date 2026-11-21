@@ -378,6 +378,11 @@ Current Price
 
 ↓
 
+Liquidity & TVL Snapshot
+(pool fee APR, TVL, 24h volume)
+
+↓
+
 Generate Candidate Ranges
 
 ↓
@@ -395,6 +400,7 @@ Estimate IL
 ↓
 
 Estimate APR
+(pool fee APR × capital efficiency × P(in range))
 
 ↓
 
@@ -408,6 +414,9 @@ Sort
 
 Return
 ```
+Without a liquidity snapshot the flow falls back to the flat 30% APR
+prior — the recommendation still works, it just doesn't know what the
+pool actually earns.
 
 Everything after "Current Price" belongs to Core.
 
@@ -798,12 +807,12 @@ Deliverables
 #### Phase 10 — Charts tab
 
 Closes the Phase 8 "Charts" backlog item. Adds a fifth tab to
-the pool page that renders a Chart.js line chart of the pool's
-recent price history (real on-chain snapshots when the RPC
-exposes archive state, deterministic synthetic GBM fallback
-otherwise) and overlays the **top-1 strategy's recommended
-price band** as a green box annotation so the user can see
-"where to enter" relative to recent price action.
+the pool page that renders a **lightweight-charts** (TradingView
+open-source) area chart of the pool's recent price history (real
+on-chain snapshots when the RPC exposes archive state, deterministic
+synthetic GBM fallback otherwise) and overlays the **top-1
+strategy's recommended price band** as green price lines so the
+user can see "where to enter" relative to recent price action.
 
 Key pieces:
   - `IProtocolAdapter.getPoolStateAtBlock(pool, blockNumber)` —
@@ -812,9 +821,16 @@ Key pieces:
   - `GetPoolHistoryUseCase` — walks the last N blocks, builds
     a chart-ready `IPoolHistoryDTO`, gracefully falls back to
     synthetic when the RPC rejects the historical block tag.
-  - `ChartsTab` + `PriceChart.client.vue` — Chart.js + the
-    `chartjs-plugin-annotation` for the strategy range box
-    and the "now" price line.
+  - `ChartsTab` + `PriceChart.client.vue` — **lightweight-charts v5**
+    (`chart.addSeries(AreaSeries, …)` + `createSeriesMarkers`) for the
+    price area, the strategy-range price lines and the "now" price
+    line.
+  - **TVL history (second pane)** — when the pool is tracked by the
+    market-data provider (DefiLlama), the TVL trend is drawn as a
+    `LineSeries` in its **own pane** with its own right-hand scale
+    (`3 : 1` pane stretch), and the charts tab shows a
+    *TVL (DefiLlama)* legend entry with the latest reading. Pools that
+    aren't tracked simply keep the single-series price chart.
 
 Also fixes a pre-existing `IRpcProvider.getBlock(bigint)` bug
 where viem 2.55+ requires `blockNumber` (not `blockTag`) for

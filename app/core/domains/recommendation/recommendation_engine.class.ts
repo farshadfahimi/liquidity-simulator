@@ -2,18 +2,23 @@
 
 import {
   CAPITAL_EFFICIENCY_SCALE,
+  CE_FACTOR_CEILING,
+  SCORE_SCALE,
   SECONDS_PER_YEAR,
+  capitalEfficiencyFactor,
   capitalEfficiencyRatio,
   ilAtRangeEdges,
+  twoSidedCoverage,
 } from '../../math';
 import type { Pool } from '../pool';
 import { Position } from '../position';
-import type { IRecommendationStrategy } from '../strategy';
+import type { IRecommendationStrategy, IStrategyContext } from '../strategy';
 import { Recommendation } from './recommendation.value-object';
 import { RecommendationSet } from './recommendation_set.value-object';
 import { ScoringConfig } from './scoring_config.value-object';
 import type { IRangeGenerator } from './range_generator.interface';
-import type { Price } from '../../shared/value_objects';
+import type { Price, TickRange } from '../../shared/value_objects';
+import type { TPoolLiquidity } from '../../shared/types';
 
 /**
  * Input for {@link RecommendationEngine.recommend}.
@@ -66,6 +71,42 @@ export interface IRecommendInput {
    * keep compiling.
    */
   readonly entryPrice?: Price;
+
+  /**
+   * Optional liquidity snapshot for the pool (TVL roadmap slice 4).
+   *
+   * When supplied together with {@link IRecommendInput.poolFeeApr},
+   * {@link IRecommendInput.dailySigmaTicks} and
+   * {@link IRecommendInput.horizonDays}, the engine computes a
+   * *range-specific* expected APR for every candidate and hands it to
+   * the strategies through an {@link IStrategyContext}:
+   *
+   *     expectedApr = poolFeeApr × capitalEfficiency × P(in range)
+   *
+   * When any of them is missing the engine runs the "prior" path
+   * exactly as before — every strategy keeps its own flat APR and the
+   * output is unchanged.
+   */
+  readonly liquidity?: TPoolLiquidity;
+
+  /**
+   * Pool-level fee APR implied by the snapshot's 24h turnover, at
+   * `APR_SCALE` (1e18 == 100%/yr). `0n` (or omitted) means "no
+   * credible APR" and disables the range-specific path.
+   */
+  readonly poolFeeApr?: bigint;
+
+  /**
+   * Per-day price volatility in *tick* units — the σ the candidate
+   * ranges were sized from. Needed to recover each candidate's
+   * z-score `k = halfWidth / (σ_daily · √horizonDays)`.
+   */
+  readonly dailySigmaTicks?: number;
+
+  /**
+   * Holding horizon in days — the other half of the `k` recovery.
+   */
+  readonly horizonDays?: number;
 }
 
 /**
@@ -156,8 +197,14 @@ export class RecommendationEngine {
       // to the current price, so it carried no information.)
       const ilAtCurrentPrice = ilAtRangeEdges(range.tickLower, range.tickUpper, input.pool.state.tick);
 
+      // Pool-aware context (TVL roadmap slice 4). `undefined` whenever
+      // the caller didn't supply a usable liquidity snapshot, in which
+      // case the strategies keep their flat APR prior and the output is
+      // byte-identical to the pre-slice-4 behaviour.
+      const context = this.buildStrategyContext(input, range, ce);
+
       for (const strategy of input.strategies) {
-        const rawScore = strategy.score(input.pool, position);
+        const rawScore = strategy.score(input.pool, position, context);
 
         if (rawScore === 0n) {
           continue;
@@ -176,7 +223,7 @@ export class RecommendationEngine {
             strategyName: strategy.name,
             range,
             score: weighted,
-            expectedApr: this.extractExpectedApr(strategy),
+            expectedApr: context?.expectedApr ?? this.extractExpectedApr(strategy),
             feeRatePerSecond,
             ilAtCurrentPrice,
             capitalEfficiency: ce,
@@ -218,6 +265,77 @@ export class RecommendationEngine {
       },
       raw,
     );
+  }
+
+  /**
+   * Build the per-candidate {@link IStrategyContext} (TVL roadmap
+   * slice 4).
+   *
+   * The expected APR of a candidate is
+   *
+   *     expectedApr = poolFeeApr × capitalEfficiency × P(in range)
+   *
+   * with
+   *   - `poolFeeApr` — the pool's own fee APR (from the caller's
+   *     liquidity snapshot). `0n` / absent → no context at all.
+   *   - `capitalEfficiency` — the *normalised* CE factor
+   *     (`ln(CE) / ln(ceiling)`, i.e. the very factor the strategies
+   *     rank with) rather than the raw CE ratio: the raw ratio is
+   *     unbounded (≈ 40× at ±5%), so multiplying it into an APR would
+   *     push the "expected APR" far outside any plausible range and
+   *     saturate the strategies' APR factor — which would make the
+   *     in-range probability irrelevant again. The normalised factor
+   *     lives in `[0, 1]`, so `expectedApr ≤ poolFeeApr`.
+   *   - `P(in range)` — `2Φ(k) − 1`, where the z-score `k` is
+   *     recovered from the candidate's own half-width:
+   *     `k = halfWidth / (σ_daily · √horizonDays)`.
+   *
+   * Returns `undefined` when the caller didn't supply everything the
+   * formula needs — the strategies then use their own APR prior and
+   * the output is identical to the pre-slice-4 behaviour.
+   */
+  private buildStrategyContext(
+    input: IRecommendInput,
+    range: TickRange,
+    ce: bigint,
+  ): IStrategyContext | undefined {
+    const liquidity = input.liquidity;
+    const poolFeeApr = input.poolFeeApr ?? 0n;
+
+    if (!liquidity || poolFeeApr <= 0n) {
+      return undefined;
+    }
+
+    const sigma = input.dailySigmaTicks ?? 0;
+    const horizon = input.horizonDays ?? 0;
+
+    if (!Number.isFinite(sigma) || sigma <= 0) {
+      return undefined;
+    }
+
+    if (!Number.isFinite(horizon) || horizon <= 0) {
+      return undefined;
+    }
+
+    // z-score of the candidate: how many σ of the horizon fit into
+    // half of the candidate range.
+    const halfWidth = (range.tickUpper - range.tickLower) / 2;
+    const k = halfWidth / (sigma * Math.sqrt(horizon));
+
+    const inRangeProbability = twoSidedCoverage(k);
+    const ceFactor = capitalEfficiencyFactor(ce, CE_FACTOR_CEILING);
+
+    // APR_SCALE × CE_FACTOR_SCALE × NORMAL_CDF_SCALE ÷ SCORE_SCALE²
+    // → APR_SCALE. (All three scales are 1e18.)
+    const expectedApr = (poolFeeApr * ceFactor * inRangeProbability)
+      / (SCORE_SCALE * SCORE_SCALE);
+
+    return {
+      expectedApr,
+      poolFeeApr,
+      tvlUsd: liquidity.tvlUsd,
+      inRangeProbability,
+    };
   }
 
   /**

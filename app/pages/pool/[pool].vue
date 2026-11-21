@@ -10,6 +10,7 @@
 import type { TAddress } from '@core/shared/types';
 import { Pool } from '@core/domains/pool';
 import type { IPoolAnalysisDTO, IRecommendationDTO, IPositionSimulationDTO } from '@core/application/dtos';
+import { toPoolLiquidity } from '@core/application/dtos';
 
 definePageMeta({
   layout: 'default',
@@ -75,6 +76,25 @@ async function loadAnalysis() {
 }
 
 // -----------------------------------------------------------------
+// Liquidity / TVL (GetPoolTvlUseCase — TVL roadmap slice 3)
+//
+// The use case owns the whole fallback chain (indexed TVL → on-chain
+// estimate → stablecoin anchor → token units) and reports which tier
+// it used in `source`. The composable is pure glue.
+// -----------------------------------------------------------------
+const { tvl, isLoadingTvl, lastError: tvlError, loadTvl, resetTvl } = usePoolTvl();
+
+async function loadPoolTvl() {
+  if (!poolAddress.value || !chainId.value) return;
+
+  await loadTvl({
+    pool: poolAddress.value as TAddress,
+    chainId: chainId.value,
+    protocolId: protocolId.value,
+  });
+}
+
+// -----------------------------------------------------------------
 // Recommendation (CompareStrategiesUseCase)
 // -----------------------------------------------------------------
 const recommendation = ref<IRecommendationDTO | null>(null);
@@ -120,6 +140,11 @@ async function loadRecommendation() {
       protocolId: protocolId.value,
       history,
       horizonDays: 7,
+      // TVL roadmap slice 4 — feed the pool's liquidity snapshot in
+      // so the recommendation uses the pool's *own* fee APR and a
+      // range-specific expected APR. Without a snapshot the use case
+      // keeps its 30% prior (unchanged behaviour).
+      ...(tvl.value ? { liquidity: toPoolLiquidity(tvl.value) } : {}),
     });
     recommendation.value = result;
   }
@@ -219,10 +244,14 @@ watch(poolAddress, () => {
   analysisError.value = null;
   recommendationError.value = null;
   simulationError.value = null;
+  resetTvl();
 });
 
 onMounted(async () => {
-  await loadAnalysis();
+  // The TVL card is independent of the analysis: it has its own
+  // fallback chain and never blocks on market data. Both run in
+  // parallel so the TVL numbers don't wait for the RPC history read.
+  await Promise.all([loadAnalysis(), loadPoolTvl()]);
   if (analysis.value) {
     await loadRecommendation();
   }
@@ -259,7 +288,13 @@ const tabComponents: Record<string, ReturnType<typeof resolveComponent>> = {
 function getTabProps(value: string): Record<string, unknown> {
   switch (value) {
     case 'details':
-      return { analysis: analysis.value, loading: isLoadingAnalysis.value };
+      return {
+        analysis: analysis.value,
+        loading: isLoadingAnalysis.value,
+        tvl: tvl.value,
+        tvlLoading: isLoadingTvl.value,
+        tvlError: tvlError.value,
+      };
     case 'recommendation':
       return {
         recommendation: recommendation.value,

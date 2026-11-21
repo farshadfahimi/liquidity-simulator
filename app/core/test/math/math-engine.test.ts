@@ -30,13 +30,14 @@ import {
 import { Position } from '@core/domains/position';
 import { createPoolHistory } from '@core/domains/history';
 import { Price, TickRange, sqrtPriceX96ToPrice } from '@core/shared/value_objects';
-import { formatAmount } from '@core/shared/utils';
+import { formatAmount, USD_DECIMALS } from '@core/shared/utils';
 import {
   APR_SCALE,
   CAPITAL_EFFICIENCY_SCALE,
   IL_SCALE,
   SCORE_SCALE,
   VOLATILITY_SCALE,
+  virtualReservesInUsd,
 } from '@core/math';
 
 import { PRICE_DECIMALS } from '../test-constants';
@@ -114,15 +115,18 @@ describe('Phase 4 — Mathematical Engine', () => {
     const { state } = live;
     const analytics = createAnalyticsEngine();
 
-    // Three symmetric ranges around the current tick. CE =
-    // P_upper / P_lower = 1.0001^width, so a narrower range ⇒
-    // smaller width ⇒ smaller CE.
+    // Three symmetric ranges around the current tick, each with the
+    // *full* width 2*w*tickSpacing (w in {100, 500, 2000}).
     //
-    // We assert the *full* width is 2*w, with w in {100, 500, 2000}.
-    // CE grows monotonically with `w`, so:
-    //   w=100  →  full width 200  ticks  →  CE = 1.0001^200
-    //   w=500  →  full width 1000 ticks  →  CE = 1.0001^1000
-    //   w=2000 →  full width 4000 ticks  →  CE = 1.0001^4000
+    // Capital efficiency is the true CE metric:
+    //
+    //   CE = 1 / (1 − (P_lower/P_upper)^¼)   (symmetric case)
+    //
+    // so a **narrower** range concentrates more capital ⇒ **higher**
+    // CE (see `math/capital_efficiency.util.ts`: "±10% ≈ 20×,
+    // ±5% ≈ 40×"). The price-band ratio `P_upper/P_lower` is the
+    // opposite metric (it grows with the width) and is no longer what
+    // `analytics.capitalEfficiency` returns.
     const ceValues: bigint[] = [];
     for (const w of [100, 500, 2000]) {
       const halfWidth = w * state.tickSpacing;
@@ -132,10 +136,9 @@ describe('Phase 4 — Mathematical Engine', () => {
       const ce = analytics.capitalEfficiency(range);
       ceValues.push(ce);
     }
-    // CE[w=100] < CE[w=500] < CE[w=2000] (the narrower the range,
-    // the smaller the price-band ratio).
-    expect(ceValues[0]!).toBeLessThan(ceValues[1]!);
-    expect(ceValues[1]!).toBeLessThan(ceValues[2]!);
+    // CE[w=100] > CE[w=500] > CE[w=2000] (narrower ⇒ higher).
+    expect(ceValues[0]!).toBeGreaterThan(ceValues[1]!);
+    expect(ceValues[1]!).toBeGreaterThan(ceValues[2]!);
   });
 
   it('ConstantRangeGenerator + VolatilityAdjustedRangeGenerator both produce aligned ranges', async () => {
@@ -252,5 +255,36 @@ describe('Phase 4 — Mathematical Engine', () => {
 
     // formatAmount sanity (just call it).
     expect(formatAmount(position.amount0, state.token0.decimals).length).toBeGreaterThan(0);
+  });
+});
+
+describe('TVL roadmap slice 1 — virtualReservesInUsd', () => {
+  it('values the virtual reserves at the hand-computed amount', () => {
+    // Synthetic pool at a raw price of 4 token1 per token0, i.e.
+    // sqrtPriceX96 = 2 × 2^96 (the square root of 4).
+    //
+    //   amount0Raw = L × 2^96 / (2 × 2^96) = L / 2 = 5e11
+    //   amount1Raw = L × (2 × 2^96) / 2^96 = 2L   = 2e12
+    //
+    // Valued with token0 = 6 decimals at $1 and token1 = 18 decimals
+    // at $3,000 (both prices on the 1e18 scale):
+    //
+    //   leg0 = 5e11 raw USDC = 5e5 USDC   → $500,000.000
+    //   leg1 = 2e12 raw WETH = 2e-6 WETH  → $0.006
+    //   total = $500,000.006
+    const liquidity = 1_000_000_000_000n;
+    const sqrtPriceX96 = 2n * 2n ** 96n;
+
+    const usd = virtualReservesInUsd(
+      liquidity,
+      sqrtPriceX96,
+      6, // token0 decimals
+      18, // token1 decimals
+      10n ** 18n, // $1 per token0
+      3000n * 10n ** 18n, // $3,000 per token1
+    );
+
+    expect(usd).toBe(500_000_006_000n);
+    expect(usd).toBe(500_000n * 10n ** BigInt(USD_DECIMALS) + 6_000n);
   });
 });

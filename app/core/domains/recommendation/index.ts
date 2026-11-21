@@ -2,7 +2,10 @@
 
 // Interfaces
 export type { IRangeGenerator } from './range_generator.interface';
-export type { IRecommendationFields, IRecommendation } from './recommendation.value-object';
+// The pool-aware context handed to strategies (TVL roadmap slice 4)
+// and the strategy contract it extends.
+export type { IStrategyContext, IRecommendationStrategy } from '../strategy';
+export type { IRecommendationFields } from './recommendation.value-object';
 export type {
   IRecommendationSetContext,
 } from './recommendation_set.value-object';
